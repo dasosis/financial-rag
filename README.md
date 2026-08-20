@@ -201,6 +201,25 @@ The questions span the income statement, balance sheet, cash flow statement, seg
 and narrative sections, and their ground truths were read directly from Microsoft's FY2024
 10-K. Point the pipeline at a different filing and you must replace the whole list.
 
+### Results
+
+Measured on Microsoft's FY2024 10-K with `gpt-4o-mini` as the judge — 28 questions, two
+full evaluation passes per configuration. "Before" and "after" refer to the table-aware
+chunking fix that stops prose being glued to the table above it:
+
+| Metric | Before chunking fix | After chunking fix |
+| --- | --- | --- |
+| Faithfulness | 0.875 (both passes) | **0.911** (0.929 / 0.893) |
+| Answer relevancy | 0.887 | 0.886 |
+
+The faithfulness gain is driven almost entirely by one question — capital expenditures,
+a cash-flow-statement line — which went from 0.50 to 1.00 consistently in both passes.
+That is exactly the table-adjacent-prose case the fix targets. Relevancy is unchanged
+because both configurations retrieve the same pages in the same order; only the chunk
+boundaries within them differ. Individual questions can still flip between runs of an
+identical configuration (the judge is an LLM), so treat mean deltas smaller than ~0.04
+as noise.
+
 Two things to know before reading the numbers:
 
 - **A correct refusal scores 0.0 on answer relevancy.** RAGAs treats "not found in
