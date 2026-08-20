@@ -1,0 +1,27 @@
+# Core RAG stack
+langchain>=0.3.25
+langchain-openai>=0.3.16
+langchain-chroma
+langchain-community>=0.3.24
+langchain-text-splitters>=0.3.8
+chromadb
+openai>=1.78.0
+tiktoken>=0.7.0
+sentence-transformers>=3.0.0
+
+# Document loading
+pypdf>=5.4.0
+
+# Serving
+fastapi>=0.115.12
+uvicorn[standard]>=0.34.2
+streamlit>=1.45.0
+httpx>=0.28.1
+pydantic>=2.11.3
+
+# Evaluation
+ragas>=0.2.15
+datasets>=3.5.0
+
+# Config
+python-dotenv>=1.1.0

@@ -1,0 +1,40 @@
+# Secrets
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Vector store (rebuild with `python ingest.py`)
+chroma_db/
+
+# Source corpus — add your own 10-K PDFs to data/
+data/*.pdf
+
+# Evaluation output
+evaluation_results.json
+
+# Model / HF caches
+.cache/
+sentence_transformers/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

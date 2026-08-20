@@ -1,0 +1,5 @@
+# Normalise to LF in the repository; check out LF everywhere.
+* text=auto eol=lf
+
+*.pdf binary
+*.sqlite3 binary
