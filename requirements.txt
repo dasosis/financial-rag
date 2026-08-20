@@ -15,7 +15,7 @@ pypdf>=5.4.0
 # Serving
 fastapi>=0.115.12
 uvicorn[standard]>=0.34.2
-streamlit>=1.45.0
+streamlit>=1.61.1
 httpx>=0.28.1
 pydantic>=2.11.3
 
