@@ -5,7 +5,7 @@ langchain-chroma
 langchain-community>=0.3.24,<0.4
 langchain-text-splitters>=0.3.8
 chromadb
-openai>=1.78.0
+openai>=3.1.0
 tiktoken>=0.7.0
 sentence-transformers>=3.0.0
 
