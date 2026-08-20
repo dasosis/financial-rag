@@ -170,6 +170,18 @@ before/after table so you can see whether a retrieval change actually helped.
 The ground-truth strings in `EVAL_QUESTIONS` are placeholders — fill them in with real
 figures from your own filing before reading much into the numbers.
 
+Two things to know before reading the numbers:
+
+- **Small deltas are noise.** With five questions, and faithfulness taking only a few
+  discrete values each, one question flipping moves the mean by 0.1. Repeated runs against
+  an *unchanged* vector store produced faithfulness means spanning 0.80-0.90, so a
+  difference smaller than that tells you nothing. Widen `EVAL_QUESTIONS` before concluding
+  a retrieval change helped.
+- **A correct refusal scores 0.0 on answer relevancy.** RAGAs treats "not found in
+  context" as non-committal and scores it zero, so the pipeline is penalised for exactly
+  the behaviour the strict prompt is meant to produce. The capital-expenditures question
+  does this today.
+
 ---
 
 ## Tests
