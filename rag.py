@@ -76,13 +76,22 @@ class RAGResponse:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def doc_to_context(doc) -> str:
+    """Render one retrieved chunk the way the LLM sees it: provenance + content.
+
+    evaluate.py uses this too, so RAGAs judges the answer against exactly the
+    context the model was given. Passing bare page_content instead makes the page
+    citation the system prompt mandates look like an unsupported claim, which
+    caps faithfulness at roughly 0.5 for every correctly-cited answer.
+    """
+    meta = doc.metadata
+    source = meta.get("source_file", meta.get("source", "unknown"))
+    page = meta.get("page", "?")
+    return f"Source: {source}, Page: {page}\n{doc.page_content}"
+
+
 def _format_docs(docs) -> str:
-    parts = []
-    for i, doc in enumerate(docs, 1):
-        meta = doc.metadata
-        source = meta.get("source_file", meta.get("source", "unknown"))
-        page = meta.get("page", "?")
-        parts.append(f"[{i}] Source: {source}, Page: {page}\n{doc.page_content}")
+    parts = [f"[{i}] {doc_to_context(doc)}" for i, doc in enumerate(docs, 1)]
     return "\n\n---\n\n".join(parts)
 
 
