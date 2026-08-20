@@ -1,0 +1,32 @@
+# VCS and CI
+.git
+.github
+.gitignore
+.gitattributes
+
+# Secrets - the key enters the container via env_file, never the image
+.env
+
+# Local state the image must not contain: the store is a volume, PDFs are
+# bind-mounted into the ingest job
+chroma_db
+data
+evaluation_results.json
+
+# Python cruft
+__pycache__
+*.pyc
+.venv
+venv
+.pytest_cache
+.ruff_cache
+
+# Not needed inside the image
+tests
+requirements-dev.txt
+start.py
+README.md
+LICENSE
+Dockerfile
+compose.yaml
+.dockerignore

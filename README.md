@@ -110,6 +110,36 @@ python rag.py "What was total revenue?"       # one-shot CLI query
 
 ---
 
+## Run with Docker
+
+Requires Docker with the Compose plugin, and a `.env` file with your `OPENAI_API_KEY`
+(the key reaches the containers via `env_file` and is never baked into the image).
+
+```bash
+docker compose run --rm ingest     # one-off: embed data/*.pdf into the store
+docker compose up                  # API on :8000, UI on :8501
+```
+
+One image serves all three roles — API, UI, and the ingest job — selected by the compose
+`command`. The vector store lives in the named volume `chroma-data`, so it survives
+rebuilds and restarts; re-run the ingest job to rebuild it after changing chunking. PDFs
+are bind-mounted read-only from `./data` into the ingest container.
+
+Details worth knowing:
+
+- The image installs **CPU-only torch** before the rest of the requirements, keeping
+  ~2 GB of CUDA wheels out of the build.
+- The **reranker model is baked into the image** at build time, so no Hugging Face
+  download happens at runtime — the running containers only need network access to
+  OpenAI.
+- The UI reaches the API at `http://api:8000` via the compose network; `app.py` reads
+  this from the `API_URL` environment variable and falls back to `localhost` outside
+  Docker.
+- Containers run as a non-root user, and the API exposes a `/health` healthcheck that
+  gates UI startup.
+
+---
+
 ## API
 
 `POST /query`
@@ -162,25 +192,24 @@ The only required environment variable is `OPENAI_API_KEY`, read from `.env`.
 python evaluate.py
 ```
 
-Runs [RAGAs](https://docs.ragas.io) over a fixed question set, scoring **faithfulness**
-(are the claims grounded in the retrieved context?) and **answer relevancy**. Results are
-written to `evaluation_results.json`; if that file already exists, the run prints a
-before/after table so you can see whether a retrieval change actually helped.
+Runs [RAGAs](https://docs.ragas.io) over the 28 questions in `EVAL_QUESTIONS`, scoring
+**faithfulness** (are the claims grounded in the retrieved context?) and **answer
+relevancy**. Results are written to `evaluation_results.json`; if that file already exists,
+the run prints a before/after table so you can see whether a retrieval change helped.
 
-The ground-truth strings in `EVAL_QUESTIONS` are placeholders — fill them in with real
-figures from your own filing before reading much into the numbers.
+The questions span the income statement, balance sheet, cash flow statement, segment note,
+and narrative sections, and their ground truths were read directly from Microsoft's FY2024
+10-K. Point the pipeline at a different filing and you must replace the whole list.
 
 Two things to know before reading the numbers:
 
-- **Small deltas are noise.** With five questions, and faithfulness taking only a few
-  discrete values each, one question flipping moves the mean by 0.1. Repeated runs against
-  an *unchanged* vector store produced faithfulness means spanning 0.80-0.90, so a
-  difference smaller than that tells you nothing. Widen `EVAL_QUESTIONS` before concluding
-  a retrieval change helped.
 - **A correct refusal scores 0.0 on answer relevancy.** RAGAs treats "not found in
   context" as non-committal and scores it zero, so the pipeline is penalised for exactly
-  the behaviour the strict prompt is meant to produce. The capital-expenditures question
-  does this today.
+  the behaviour the strict prompt is meant to produce.
+- **The eval must see the same context the model saw.** `evaluate.py` builds contexts with
+  `rag.doc_to_context()`, which prefixes each chunk with its source and page. Passing the
+  bare `page_content` makes the page citation the prompt mandates look like an unsupported
+  claim, which pins faithfulness near 0.5 for every correctly-cited answer.
 
 ---
 

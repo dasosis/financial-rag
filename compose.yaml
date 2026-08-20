@@ -1,0 +1,49 @@
+# Financial Report Q&A Engine
+#
+#   docker compose run --rm ingest   # one-off: embed data/*.pdf into the store
+#   docker compose up                # API on :8000, UI on :8501
+#
+# The vector store lives in the named volume `chroma-data`, so it survives
+# rebuilds and restarts. Re-run the ingest job after changing chunking.
+
+services:
+  api:
+    build: .
+    env_file: .env                     # OPENAI_API_KEY
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma-data:/app/chroma_db
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  ui:
+    build: .
+    command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true --browser.gatherUsageStats false
+    environment:
+      # Inside the compose network the API is reachable by service name,
+      # not localhost. app.py reads this; defaults to localhost outside Docker.
+      API_URL: http://api:8000/query
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # One-shot job, excluded from `docker compose up` by its profile.
+  # PDFs are bind-mounted read-only from ./data on the host.
+  ingest:
+    profiles: ["tools"]
+    build: .
+    command: python ingest.py
+    env_file: .env
+    volumes:
+      - chroma-data:/app/chroma_db
+      - ./data:/app/data:ro
+
+volumes:
+  chroma-data:

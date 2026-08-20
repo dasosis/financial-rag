@@ -8,10 +8,13 @@ Requires the FastAPI server to be running:
     uvicorn api:app --reload --port 8000
 """
 
+import os
+
 import httpx
 import streamlit as st
 
-API_URL = "http://localhost:8000/query"
+# Overridden in Docker, where the API is reachable by service name, not localhost.
+API_URL = os.getenv("API_URL", "http://localhost:8000/query")
 
 st.set_page_config(
     page_title="Financial Report Q&A",
