@@ -66,7 +66,12 @@ requires a `(file.pdf, p.NN)` citation after each claim. Anything missing comes 
 
 ## Quickstart
 
-**Requirements:** Python 3.10+ and an OpenAI API key.
+**Requirements:** Python 3.10-3.12 and an OpenAI API key.
+
+> Python 3.13+ is not supported yet: `ragas` 0.2.x fails on 3.14's asyncio
+> changes, and one of its dependencies has no wheel for it. The rest of the
+> pipeline (ingest, retrieval, API, UI) runs fine on 3.14 - only `evaluate.py`
+> is affected.
 
 ```bash
 git clone https://github.com/dasosis/financial-rag.git

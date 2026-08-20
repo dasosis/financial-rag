@@ -2,7 +2,7 @@
 langchain>=0.3.25
 langchain-openai>=0.3.16
 langchain-chroma
-langchain-community>=0.3.24
+langchain-community>=0.3.24,<0.4
 langchain-text-splitters>=0.3.8
 chromadb
 openai>=1.78.0
