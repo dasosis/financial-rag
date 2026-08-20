@@ -10,7 +10,7 @@ tiktoken>=0.7.0
 sentence-transformers>=3.0.0
 
 # Document loading
-pypdf>=5.4.0
+pypdf>=6.16.1
 
 # Serving
 fastapi>=0.115.12
