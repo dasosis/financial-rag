@@ -58,14 +58,9 @@ def test_protect_marks_every_table_line():
     assert "Outro." in protected.page_content
 
 
-def test_protect_separates_the_block_from_the_preceding_paragraph():
-    """A blank line is inserted before the table block so the splitter has a
-    paragraph boundary to break on rather than cutting mid-table.
-
-    Note: no blank line is added *after* the block - in `_protect_table_blocks`
-    that trailing separator is guarded by a condition that never holds, because
-    the preceding line is always a marked table line.
-    """
+def test_protect_isolates_the_block_from_surrounding_prose():
+    """A blank line is inserted on each side of the table block so the splitter
+    has a paragraph boundary to break on rather than cutting mid-table."""
     doc = Document(page_content="\n".join(["Intro paragraph.", *TABLE_LINES, "Outro."]))
     (protected,) = _protect_table_blocks([doc])
     lines = protected.page_content.split("\n")
@@ -73,8 +68,28 @@ def test_protect_separates_the_block_from_the_preceding_paragraph():
     first_table = next(i for i, ln in enumerate(lines) if ln.endswith(_TABLE_NL))
     last_table = max(i for i, ln in enumerate(lines) if ln.endswith(_TABLE_NL))
     assert lines[first_table - 1] == ""
+    assert lines[last_table + 1] == ""
     # The block is contiguous: every line between first and last is marked.
     assert all(lines[i].endswith(_TABLE_NL) for i in range(first_table, last_table + 1))
+
+
+def test_protect_does_not_double_up_existing_blank_separators():
+    """When the table is already surrounded by blank lines, no extra ones are added."""
+    original = "\n".join(["Intro paragraph.", "", *TABLE_LINES, "", "Outro."])
+    (protected,) = _protect_table_blocks([Document(page_content=original)])
+    lines = protected.page_content.split("\n")
+
+    assert lines.count("") == 2
+    assert len(lines) == len(original.split("\n"))
+
+
+def test_protect_handles_a_table_at_the_end_of_the_page():
+    """A block that runs to the end of the content needs no trailing separator."""
+    original = "\n".join(["Intro paragraph.", *TABLE_LINES])
+    (protected,) = _protect_table_blocks([Document(page_content=original)])
+    lines = protected.page_content.split("\n")
+
+    assert lines[-1] == TABLE_LINES[-1] + _TABLE_NL
 
 
 def test_restore_recovers_the_original_table_text():

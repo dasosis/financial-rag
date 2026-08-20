@@ -82,8 +82,10 @@ def _protect_table_blocks(docs: list) -> list:
             else:
                 if in_table:
                     in_table = False
-                    # Blank line after the table block to signal a paragraph break
-                    if out and not out[-1].endswith(_TABLE_NL):
+                    # Blank line after the table block to signal a paragraph break.
+                    # Skipped when the terminating line is itself blank, since it
+                    # already provides the break.
+                    if line != "":
                         out.append("")
                 out.append(line)
         doc.page_content = "\n".join(out)
