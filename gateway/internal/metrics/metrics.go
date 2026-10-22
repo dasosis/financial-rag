@@ -38,6 +38,8 @@ type Metrics struct {
 	Served    *prometheus.CounterVec // provider, endpoint: who answered each call
 	Failovers *prometheus.CounterVec // endpoint
 	Breaker   *prometheus.GaugeVec   // provider: 0 closed, 1 half-open, 2 open
+
+	Redactions *prometheus.CounterVec // type: EMAIL, PHONE, CARD, SSN, PAN, AADHAAR
 }
 
 // New registers the gateway's metrics, plus Go runtime and process metrics.
@@ -107,13 +109,17 @@ func New() *Metrics {
 			Name: "gateway_breaker_state",
 			Help: "Each provider's circuit breaker in this replica: 0 closed, 1 half-open, 2 open.",
 		}, []string{"provider"}),
+		Redactions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_redactions_total",
+			Help: "Pieces of personal data replaced in prompts, by type. The values are never recorded.",
+		}, []string{"type"}),
 	}
 	m.Registry.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.Requests, m.Latency, m.TTFB, m.InFlight, m.Tokens, m.Upstream, m.UpLatency,
 		m.Cost, m.LimiterDegraded, m.Rejections, m.Cache, m.CacheSaved,
-		m.Served, m.Failovers, m.Breaker,
+		m.Served, m.Failovers, m.Breaker, m.Redactions,
 	)
 	for _, result := range []string{"hit", "miss", "bypass"} {
 		m.Cache.WithLabelValues(result)

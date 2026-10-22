@@ -107,6 +107,8 @@ func (s *Server) chat(c *call) {
 			"The body must be a JSON chat completions request with a model.")
 		return
 	}
+	// Before the cache key and before anything goes upstream
+	s.redactChat(req)
 	lookup := s.cacheLookup(c, req)
 	if lookup.hit != nil {
 		s.serveCached(c, req, lookup.hit)

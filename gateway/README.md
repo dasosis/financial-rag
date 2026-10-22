@@ -122,6 +122,35 @@ do `gateway_served_total{provider}` and `gateway_failovers_total`;
 failover and nothing stored in the cache. Only callers with the internal key get
 that far; the benchmarks use it to score the backup on its own.
 
+## PII redaction
+
+Before a call is cached or sent anywhere, personal data in its messages (plain
+content and text parts) and in embeddings input is replaced with typed
+placeholders. High-precision detectors only, each needing the value's own format
+and, where one exists, its checksum:
+
+| Placeholder | Found |
+| --- | --- |
+| `[EMAIL]` | `name@domain.tld` |
+| `[PHONE]` | formatted numbers only: `(425) 882-8080`, `425-882-8080`, `425.882.8080`, `1-800-…`, and with a country code `+44 20 7946 0958` |
+| `[CARD]` | 13–19 digits, plain or in 4-4-4-4 / 4-6-5 groups, passing the Luhn check |
+| `[SSN]` | dashed `123-45-6789`, with a valid area, group and serial |
+| `[PAN]` | India's Permanent Account Number, `ABCPE1234F` |
+| `[AADHAAR]` | 12 digits, plain or 4-4-4, passing the Verhoeff check |
+
+A digit format is only taken whole, never as a slice of a longer run of digits,
+and a run whose groups are all years is never a card or Aadhaar number, so a row
+of years in a table ("2024 2023 2022 2021") stays as it is. The test that guards
+this runs the redactor over the text of both sample 10-Ks, as the app extracts
+it, and every benchmark question: no figure, year, EPS value, share count,
+percentage, page or citation may change, no question may change at all, and the
+only matches allowed are the companies' own published phone numbers on their
+cover pages (`internal/redact/testdata`; `make_fixtures.py` regenerates it).
+
+`gateway_redactions_total{type}` counts what was replaced. The values themselves
+are never logged, stored or put in a metric. `GATEWAY_REDACT` picks the kinds
+(`all` by default, `off`, or e.g. `email,phone`).
+
 ## Configuration
 
 | Variable | Default | |
@@ -146,6 +175,7 @@ that far; the benchmarks use it to score the backup on its own.
 | `GATEWAY_BACKUP_MODELS` | `gpt-4o-mini=openai/gpt-4o-mini` | `asked=backup,…`; embeddings only to the same model |
 | `GATEWAY_BACKUP_JSON_SCHEMA` | `true` | the backup can follow `json_schema`; `false` makes such calls 503 instead |
 | `GATEWAY_BREAKER_FAILURES`, `GATEWAY_BREAKER_COOLDOWN` | `5`, `30s` | |
+| `GATEWAY_REDACT` | `all` | `off`, or a list: `email,phone,card,ssn,pan,aadhaar` |
 | `GATEWAY_CACHE_REDIS_URL` | (unset: no cache) | `redis://llm-gateway-cache:6379/0` in compose |
 | `GATEWAY_CACHE_TTL` | `168h` | how long an answer is kept |
 | `GATEWAY_REPLICAS` | `3` | how many replicas share the limits; the fallback divides by it |

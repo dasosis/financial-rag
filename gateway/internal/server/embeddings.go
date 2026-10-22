@@ -22,6 +22,7 @@ func (s *Server) embeddings(c *call) {
 			"The body must be a JSON embeddings request with a model.")
 		return
 	}
+	body, fields = s.redactEmbeddings(body, fields)
 	// About four characters a token; the input is all there is to pay for
 	reservation, ok := s.admit(c, model, usage.Usage{PromptTokens: len(body)/4 + 1})
 	if !ok {

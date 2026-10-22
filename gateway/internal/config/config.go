@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dasosis/financial-rag/gateway/internal/limits"
+	"github.com/dasosis/financial-rag/gateway/internal/redact"
 )
 
 // Config is everything the gateway is told at start-up.
@@ -53,6 +55,10 @@ type Config struct {
 	// max_tokens: its budget reservation until the provider reports usage.
 	CompletionEstimate int
 	Prices             string // GATEWAY_PRICES: JSON on top of the built-in price table
+
+	// The personal data redacted from prompts: kinds from package redact, or
+	// none. GATEWAY_REDACT: "all" (the default), "off", or "email,phone,…".
+	Redact []redact.Kind
 
 	// The response cache (package cache), on a Redis of its own. Unset: no cache.
 	CacheRedisURL string
@@ -104,6 +110,11 @@ func FromEnv() (Config, error) {
 		errs = append(errs, err)
 	}
 	c.BackupModels = models
+	kinds, err := parseRedact(env("GATEWAY_REDACT", "all"))
+	if err != nil {
+		errs = append(errs, err)
+	}
+	c.Redact = kinds
 	if len(c.Key) < 16 {
 		errs = append(errs, errors.New("LLM_GATEWAY_KEY must be set (16 characters or more)"))
 	}
@@ -136,6 +147,24 @@ func parseModels(spec string) (map[string]string, error) {
 			return nil, fmt.Errorf("GATEWAY_BACKUP_MODELS: %s may only fail over to the same model, not %s", asked, backup)
 		}
 		out[asked] = backup
+	}
+	return out, nil
+}
+
+func parseRedact(spec string) ([]redact.Kind, error) {
+	switch strings.ToLower(strings.TrimSpace(spec)) {
+	case "all":
+		return redact.Kinds, nil
+	case "off", "none", "0", "false":
+		return nil, nil
+	}
+	var out []redact.Kind
+	for _, name := range strings.Split(spec, ",") {
+		kind := redact.Kind(strings.ToUpper(strings.TrimSpace(name)))
+		if !slices.Contains(redact.Kinds, kind) {
+			return nil, fmt.Errorf("GATEWAY_REDACT: unknown kind %q", name)
+		}
+		out = append(out, kind)
 	}
 	return out, nil
 }
