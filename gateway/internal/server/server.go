@@ -22,11 +22,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/dasosis/financial-rag/gateway/internal/config"
+	"github.com/dasosis/financial-rag/gateway/internal/limits"
 	"github.com/dasosis/financial-rag/gateway/internal/metrics"
+	"github.com/dasosis/financial-rag/gateway/internal/pricing"
 )
 
 // Error codes the app maps to its own exceptions (financial_rag/config.py).
@@ -45,13 +48,27 @@ type Server struct {
 	metrics  *metrics.Metrics
 	log      *slog.Logger
 	provider *Provider
+	limiter  *limits.Limiter
+	prices   *pricing.Table
 	ready    atomic.Bool
+	unpriced sync.Map // models already warned about
+}
+
+// Deps are what a server works with besides its configuration.
+type Deps struct {
+	Metrics *metrics.Metrics
+	Log     *slog.Logger
+	Limiter *limits.Limiter // nil: no limits or budgets
+	Prices  *pricing.Table  // nil: the built-in price table
 }
 
 // New builds a server that sends calls to OpenAI.
-func New(cfg config.Config, m *metrics.Metrics, log *slog.Logger) *Server {
+func New(cfg config.Config, d Deps) *Server {
+	if d.Prices == nil {
+		d.Prices, _ = pricing.New("")
+	}
 	s := &Server{
-		cfg: cfg, metrics: m, log: log,
+		cfg: cfg, metrics: d.Metrics, log: d.Log, limiter: d.Limiter, prices: d.Prices,
 		provider: NewProvider("openai", cfg.OpenAIBaseURL, cfg.OpenAIKey),
 	}
 	s.ready.Store(true)

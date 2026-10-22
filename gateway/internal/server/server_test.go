@@ -47,7 +47,7 @@ func newHarness(t *testing.T, opts fakeupstream.Options, tweak ...func(*config.C
 		f(&cfg)
 	}
 	m := metrics.New()
-	srv := New(cfg, m, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(cfg, Deps{Metrics: m, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	gw := httptest.NewServer(srv.Handler())
 	t.Cleanup(gw.Close)
 	return &harness{t: t, fake: fake, server: srv, gateway: gw, metrics: m}

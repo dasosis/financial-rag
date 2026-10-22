@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dasosis/financial-rag/gateway/internal/limits"
 )
 
 // Config is everything the gateway is told at start-up.
@@ -29,7 +31,20 @@ type Config struct {
 	EmbedTimeout      time.Duration
 
 	MaxBodyBytes int64
+
+	// Limits and budgets (package limits). Unset LimitsRedisURL: each replica
+	// keeps its own, which is only right for a single one.
+	LimitsRedisURL string
+	Limits         limits.Settings
+	// Completion tokens a call is assumed to produce when it doesn't set
+	// max_tokens: its budget reservation until the provider reports usage.
+	CompletionEstimate int
+	Prices             string // GATEWAY_PRICES: JSON on top of the built-in price table
 }
+
+// The default daily budget per user: about 20 questions at the ~16,000 input
+// tokens one measured on average (README, "End-to-end answers").
+const defaultUserBudget = 20 * 16_000
 
 // FromEnv reads the configuration, refusing to start without the keys.
 func FromEnv() (Config, error) {
@@ -43,6 +58,20 @@ func FromEnv() (Config, error) {
 		StreamTTFBTimeout: duration("GATEWAY_STREAM_TTFB_TIMEOUT", 30*time.Second),
 		EmbedTimeout:      duration("GATEWAY_EMBEDDINGS_TIMEOUT", 60*time.Second),
 		MaxBodyBytes:      int64(integer("GATEWAY_MAX_BODY_BYTES", 16<<20)),
+
+		LimitsRedisURL: strings.TrimSpace(os.Getenv("GATEWAY_LIMITS_REDIS_URL")),
+		Limits: limits.Settings{
+			// Rates are set per minute and kept per second
+			ConsumerRate:  float64(integer("GATEWAY_RATE_PER_CONSUMER", 60)) / 60,
+			ConsumerBurst: float64(integer("GATEWAY_BURST_PER_CONSUMER", 20)),
+			GlobalRate:    float64(integer("GATEWAY_RATE_GLOBAL", 300)) / 60,
+			GlobalBurst:   float64(integer("GATEWAY_BURST_GLOBAL", 60)),
+			UserBudget:    int64(integer("GATEWAY_DAILY_BUDGET_USER", defaultUserBudget)),
+			SystemBudget:  int64(integer("GATEWAY_DAILY_BUDGET_SYSTEM", 0)),
+			Replicas:      integer("GATEWAY_REPLICAS", 3),
+		},
+		CompletionEstimate: integer("GATEWAY_COMPLETION_ESTIMATE", 512),
+		Prices:             os.Getenv("GATEWAY_PRICES"),
 	}
 	var errs []error
 	if len(c.Key) < 16 {
@@ -50,6 +79,10 @@ func FromEnv() (Config, error) {
 	}
 	if c.OpenAIKey == "" {
 		errs = append(errs, errors.New("OPENAI_API_KEY must be set"))
+	}
+	if (c.Limits.ConsumerRate > 0 && c.Limits.ConsumerBurst < 1) ||
+		(c.Limits.GlobalRate > 0 && c.Limits.GlobalBurst < 1) {
+		errs = append(errs, errors.New("a rate limit needs a burst of 1 or more"))
 	}
 	return c, errors.Join(errs...)
 }

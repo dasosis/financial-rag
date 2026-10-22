@@ -19,8 +19,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/dasosis/financial-rag/gateway/internal/config"
+	"github.com/dasosis/financial-rag/gateway/internal/limits"
 	"github.com/dasosis/financial-rag/gateway/internal/metrics"
+	"github.com/dasosis/financial-rag/gateway/internal/pricing"
 	"github.com/dasosis/financial-rag/gateway/internal/server"
 )
 
@@ -45,7 +49,32 @@ func main() {
 
 func run(cfg config.Config, log *slog.Logger) error {
 	m := metrics.New()
-	srv := server.New(cfg, m, log)
+	prices, err := pricing.New(cfg.Prices)
+	if err != nil {
+		return err
+	}
+	// The limiter reports losing Redis once (limits.Limiter); go-redis would
+	// log every failed dial
+	redis.SetLogger(quietRedis{})
+	var rdb *redis.Client
+	if cfg.LimitsRedisURL != "" {
+		opts, err := redis.ParseURL(cfg.LimitsRedisURL)
+		if err != nil {
+			return fmt.Errorf("GATEWAY_LIMITS_REDIS_URL: %w", err)
+		}
+		rdb = redis.NewClient(limits.FailFast(opts))
+		defer func() { _ = rdb.Close() }()
+	} else {
+		log.Warn("GATEWAY_LIMITS_REDIS_URL is unset: limits and budgets are this process's alone")
+	}
+	var limiter *limits.Limiter
+	if rdb != nil {
+		limiter = limits.New(rdb, cfg.Limits, m, log)
+	} else {
+		limiter = limits.New(nil, cfg.Limits, m, log)
+	}
+	defer limiter.Close()
+	srv := server.New(cfg, server.Deps{Metrics: m, Log: log, Limiter: limiter, Prices: prices})
 
 	api := &http.Server{
 		Addr:              cfg.Addr,
@@ -80,6 +109,10 @@ func run(cfg config.Config, log *slog.Logger) error {
 	_ = internal.Shutdown(ctx)
 	return api.Shutdown(ctx)
 }
+
+type quietRedis struct{}
+
+func (quietRedis) Printf(context.Context, string, ...interface{}) {}
 
 func serve(s *http.Server) error {
 	if err := s.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
