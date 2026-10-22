@@ -21,6 +21,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/dasosis/financial-rag/gateway/internal/cache"
 	"github.com/dasosis/financial-rag/gateway/internal/config"
 	"github.com/dasosis/financial-rag/gateway/internal/limits"
 	"github.com/dasosis/financial-rag/gateway/internal/metrics"
@@ -74,7 +75,18 @@ func run(cfg config.Config, log *slog.Logger) error {
 		limiter = limits.New(nil, cfg.Limits, m, log)
 	}
 	defer limiter.Close()
-	srv := server.New(cfg, server.Deps{Metrics: m, Log: log, Limiter: limiter, Prices: prices})
+
+	var responses *cache.Cache
+	if cfg.CacheRedisURL != "" {
+		opts, err := redis.ParseURL(cfg.CacheRedisURL)
+		if err != nil {
+			return fmt.Errorf("GATEWAY_CACHE_REDIS_URL: %w", err)
+		}
+		crdb := redis.NewClient(limits.FailFast(opts)) // a slow cache is a miss, not a wait
+		defer func() { _ = crdb.Close() }()
+		responses = cache.New(crdb, cfg.CacheTTL)
+	}
+	srv := server.New(cfg, server.Deps{Metrics: m, Log: log, Limiter: limiter, Cache: responses, Prices: prices})
 
 	api := &http.Server{
 		Addr:              cfg.Addr,
@@ -91,7 +103,8 @@ func run(cfg config.Config, log *slog.Logger) error {
 	errs := make(chan error, 2)
 	go func() { errs <- serve(api) }()
 	go func() { errs <- serve(internal) }()
-	log.Info("listening", "addr", cfg.Addr, "metrics", cfg.MetricsAddr, "openai", cfg.OpenAIBaseURL)
+	log.Info("listening", "addr", cfg.Addr, "metrics", cfg.MetricsAddr, "openai", cfg.OpenAIBaseURL,
+		"limits_redis", cfg.LimitsRedisURL != "", "cache", responses != nil)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)

@@ -34,14 +34,20 @@ type cluster struct {
 	metrics  []*metrics.Metrics
 }
 
-func newCluster(t *testing.T, s limits.Settings) *cluster {
+func newCluster(t *testing.T, s limits.Settings) *cluster { return newClusterOpts(t, s, false) }
+
+func newClusterOpts(t *testing.T, s limits.Settings, failFast bool) *cluster {
 	t.Helper()
 	fake := fakeupstream.New(fakeupstream.Options{})
 	upstream := httptest.NewServer(fake)
 	t.Cleanup(upstream.Close)
 	mr := miniredis.RunT(t)
-	mr.SetTime(time.Date(2026, 10, 22, 18, 0, 0, 0, time.UTC)) // frozen: nothing refills
-	rdb := redis.NewClient(limits.FailFast(&redis.Options{Addr: mr.Addr()}))
+	mr.SetTime(time.Date(2026, 10, 22, 18, 0, 0, 0, time.UTC))             // frozen: nothing refills
+	opts := &redis.Options{Addr: mr.Addr(), ReadTimeout: 10 * time.Second} // see limits_test.go
+	if failFast {
+		opts = limits.FailFast(opts)
+	}
+	rdb := redis.NewClient(opts)
 	t.Cleanup(func() { _ = rdb.Close() })
 	c := &cluster{fake: fake, redis: mr, rdb: rdb}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -220,7 +226,7 @@ func (c *cluster) callCode(t *testing.T, consumer string) (int, string) {
 }
 
 func TestWithoutRedisTheReplicasStillLimit(t *testing.T) {
-	c := newCluster(t, limits.Settings{GlobalRate: 0.01, GlobalBurst: 30, Replicas: 3})
+	c := newClusterOpts(t, limits.Settings{GlobalRate: 0.01, GlobalBurst: 30, Replicas: 3}, true)
 	c.redis.Close()
 	ok := 0
 	for i := range 60 {

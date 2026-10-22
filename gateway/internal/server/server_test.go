@@ -3,16 +3,19 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/dasosis/financial-rag/gateway/internal/config"
 	"github.com/dasosis/financial-rag/gateway/internal/fakeupstream"
@@ -406,4 +409,13 @@ func TestReadEventSplitsOnBlankLines(t *testing.T) {
 	if d, ok := eventData([]byte(events[2])); !ok || string(d) != "b" {
 		t.Fatalf("data %q", d)
 	}
+}
+
+type quietRedis struct{}
+
+func (quietRedis) Printf(context.Context, string, ...interface{}) {}
+
+func TestMain(m *testing.M) {
+	redis.SetLogger(quietRedis{}) // the dial failures some tests cause on purpose
+	os.Exit(m.Run())
 }

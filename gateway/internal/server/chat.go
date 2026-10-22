@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/dasosis/financial-rag/gateway/internal/cache"
 	"github.com/dasosis/financial-rag/gateway/internal/usage"
 )
 
@@ -74,6 +75,11 @@ func (s *Server) chat(c *call) {
 			"The body must be a JSON chat completions request with a model.")
 		return
 	}
+	lookup := s.cacheLookup(c, req)
+	if lookup.hit != nil {
+		s.serveCached(c, req, lookup.hit)
+		return
+	}
 	reservation, ok := s.admit(c, req.model, req.estimate(s.cfg.CompletionEstimate))
 	if !ok {
 		return
@@ -94,15 +100,27 @@ func (s *Server) chat(c *call) {
 		return
 	}
 	if req.stream {
-		result := s.relayStream(c, resp, req.clientUsage)
+		var assembler *cache.Assembler
+		if lookup.store {
+			assembler = &cache.Assembler{}
+		}
+		result := s.relayStream(c, resp, req.clientUsage, assembler)
 		s.settle(c, reservation, s.account(req.model, result.usage))
+		if assembler != nil && result.complete() {
+			if completion, ok := assembler.Completion(); ok {
+				s.cacheStore(c, lookup.key, completion)
+			}
+		}
 		s.log.Info("answered", "request_id", c.requestID, "endpoint", c.endpoint, "stream", true,
 			"model", req.model, "finished", result.finish, "complete", result.complete(),
 			"ms", time.Since(c.start).Milliseconds())
 		return
 	}
-	used := s.relayJSON(c, resp)
+	answer, used := s.relayJSON(c, resp)
 	s.settle(c, reservation, s.account(req.model, used))
+	if lookup.store && answer != nil {
+		s.cacheStore(c, lookup.key, answer)
+	}
 	s.log.Info("answered", "request_id", c.requestID, "endpoint", c.endpoint, "stream", false,
 		"model", req.model, "ms", time.Since(c.start).Milliseconds())
 }
@@ -185,12 +203,12 @@ func (s *Server) relayError(c *call, resp *upstreamResponse) {
 		"status", resp.StatusCode)
 }
 
-// relayJSON passes a provider's JSON answer on and returns the usage in it.
-func (s *Server) relayJSON(c *call, resp *upstreamResponse) usage.Usage {
+// relayJSON passes a provider's JSON answer on, and returns it and its usage.
+func (s *Server) relayJSON(c *call, resp *upstreamResponse) ([]byte, usage.Usage) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
 		s.upstreamFailed(c, err)
-		return usage.Usage{}
+		return nil, usage.Usage{}
 	}
 	var parsed struct {
 		Usage *usage.Usage `json:"usage"`
@@ -200,9 +218,9 @@ func (s *Server) relayJSON(c *call, resp *upstreamResponse) usage.Usage {
 	c.w.WriteHeader(http.StatusOK)
 	_, _ = c.w.Write(body)
 	if parsed.Usage == nil {
-		return usage.Usage{}
+		return body, usage.Usage{}
 	}
-	return *parsed.Usage
+	return body, *parsed.Usage
 }
 
 func copyHeaders(dst, src http.Header, names ...string) {
@@ -230,7 +248,9 @@ func (r streamResult) complete() bool {
 // relayStream copies a provider's SSE stream to the caller event by event,
 // flushing each at once (never buffering the answer). The usage chunk is read
 // for its token counts and dropped unless the caller asked for it.
-func (s *Server) relayStream(c *call, resp *upstreamResponse, clientUsage bool) streamResult {
+//
+// A non-nil assembler is given every chunk, to rebuild the answer for the cache.
+func (s *Server) relayStream(c *call, resp *upstreamResponse, clientUsage bool, assembler *cache.Assembler) streamResult {
 	h := c.w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
@@ -247,6 +267,9 @@ func (s *Server) relayStream(c *call, resp *upstreamResponse, clientUsage bool) 
 			keep := true
 			if data, ok := eventData(event); ok {
 				keep = inspectChunk(data, &result, clientUsage)
+				if assembler != nil && string(bytes.TrimSpace(data)) != "[DONE]" {
+					assembler.Add(data)
+				}
 			}
 			if keep {
 				if _, werr := c.w.Write(event); werr != nil {

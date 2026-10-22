@@ -6,7 +6,8 @@ runs both on loopback ports. Nothing reaches the internet or costs money.
 
     RUN_GATEWAY_TESTS=1 pytest tests/test_gateway_live.py
 
-GO names the go binary if it isn't on PATH.
+GO names the go binary if it isn't on PATH. The response cache tests need a
+Redis: GATEWAY_TEST_REDIS_URL=redis://localhost:6379/1.
 """
 
 from __future__ import annotations
@@ -178,6 +179,57 @@ def test_a_rate_limit_reaches_the_app_as_rate_limited(binaries, monkeypatch):
                 llm.invoke("hi")
         assert 50 <= caught.value.retry_after <= 60
         assert "gateway_limit_rejections_total{reason=\"consumer_rate\"} 1" in _metrics(limited)
+
+
+@pytest.fixture
+def cached_gateway(binaries, monkeypatch):
+    url = os.getenv("GATEWAY_TEST_REDIS_URL")
+    if not url:
+        pytest.skip("set GATEWAY_TEST_REDIS_URL for the response cache tests")
+    with _running_gateway(binaries, GATEWAY_CACHE_REDIS_URL=url) as running:
+        _use(running, monkeypatch)
+        yield running
+
+
+def _cache_counts(gateway) -> dict[str, float]:
+    counts = {}
+    for line in _metrics(gateway).splitlines():
+        if line.startswith("gateway_cache_requests_total{"):
+            result = line.split('result="')[1].split('"')[0]
+            counts[result] = float(line.rsplit(" ", 1)[1])
+    return counts
+
+
+def test_a_repeat_is_answered_from_the_cache(cached_gateway):
+    question = f"What was revenue? {time.time_ns()}"   # unique per run: the Redis persists
+    llm = config.chat_model(temperature=0)
+    first, second = llm.invoke(question), llm.invoke(question)
+    assert second.content == first.content
+    assert _cache_counts(cached_gateway) == {"hit": 1, "miss": 1, "bypass": 0}
+    # A streamed repeat is replayed as SSE, with the usage ChatOpenAI asks for
+    chunks = list(llm.stream(question))
+    assert "".join(c.content for c in chunks) == first.content
+    total = chunks[0]
+    for chunk in chunks[1:]:
+        total += chunk
+    assert total.usage_metadata["output_tokens"] > 0
+    assert _cache_counts(cached_gateway)["hit"] == 2
+
+
+def test_structured_output_from_the_cache(cached_gateway):
+    planner = config.chat_model(temperature=0).with_structured_output(router.QuestionPlan)
+    question = [("human", f"Operating margin in 2024? {time.time_ns()}")]
+    assert planner.invoke(question) == planner.invoke(question)
+    assert _cache_counts(cached_gateway)["hit"] == 1
+
+
+def test_benchmarks_bypass_the_cache(cached_gateway, monkeypatch):
+    monkeypatch.setattr(config, "_cache_responses", False)   # as run_as(..., cache=False)
+    question = f"What was revenue? {time.time_ns()}"
+    llm = config.chat_model(temperature=0)
+    llm.invoke(question)
+    llm.invoke(question)
+    assert _cache_counts(cached_gateway) == {"hit": 0, "miss": 0, "bypass": 2}
 
 
 def test_a_wrong_key_is_refused(monkeypatch):
