@@ -23,6 +23,19 @@ type Config struct {
 	OpenAIKey     string
 	OpenAIBaseURL string
 
+	// The backup provider, tried when OpenAI fails (package server, dispatch).
+	// Off without OPENROUTER_API_KEY. BackupModels maps a model the app asks for
+	// to the backup's name for it; a model it doesn't list never fails over.
+	OpenRouterKey     string
+	OpenRouterBaseURL string
+	BackupModels      map[string]string
+	BackupJSONSchema  bool // the backup can follow response_format json_schema
+
+	// A provider's breaker opens after BreakerFailures failures in a row, and
+	// lets one probe through after BreakerCooldown.
+	BreakerFailures int
+	BreakerCooldown time.Duration
+
 	// How long a call may wait for the provider's first byte. Non-streamed
 	// chat calls only send theirs when the whole answer is written, and figure
 	// extraction can take minutes, so they get the most.
@@ -58,6 +71,11 @@ func FromEnv() (Config, error) {
 		Key:               strings.TrimSpace(os.Getenv("LLM_GATEWAY_KEY")),
 		OpenAIKey:         strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
 		OpenAIBaseURL:     strings.TrimRight(env("OPENAI_BASE_URL", "https://api.openai.com/v1"), "/"),
+		OpenRouterKey:     strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")),
+		OpenRouterBaseURL: strings.TrimRight(env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"), "/"),
+		BackupJSONSchema:  boolean("GATEWAY_BACKUP_JSON_SCHEMA", true),
+		BreakerFailures:   integer("GATEWAY_BREAKER_FAILURES", 5),
+		BreakerCooldown:   duration("GATEWAY_BREAKER_COOLDOWN", 30*time.Second),
 		ChatTimeout:       duration("GATEWAY_CHAT_TIMEOUT", 180*time.Second),
 		StreamTTFBTimeout: duration("GATEWAY_STREAM_TTFB_TIMEOUT", 30*time.Second),
 		EmbedTimeout:      duration("GATEWAY_EMBEDDINGS_TIMEOUT", 60*time.Second),
@@ -81,6 +99,11 @@ func FromEnv() (Config, error) {
 		CacheTTL:      duration("GATEWAY_CACHE_TTL", 7*24*time.Hour),
 	}
 	var errs []error
+	models, err := parseModels(env("GATEWAY_BACKUP_MODELS", "gpt-4o-mini=openai/gpt-4o-mini"))
+	if err != nil {
+		errs = append(errs, err)
+	}
+	c.BackupModels = models
 	if len(c.Key) < 16 {
 		errs = append(errs, errors.New("LLM_GATEWAY_KEY must be set (16 characters or more)"))
 	}
@@ -92,6 +115,42 @@ func FromEnv() (Config, error) {
 		errs = append(errs, errors.New("a rate limit needs a burst of 1 or more"))
 	}
 	return c, errors.Join(errs...)
+}
+
+// parseModels reads "asked=backup,asked=backup". An embedding model may only
+// map to the same model under another name: vectors from a different model
+// can't be compared with the ones already stored.
+func parseModels(spec string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, pair := range strings.Split(spec, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		asked, backup, ok := strings.Cut(pair, "=")
+		asked, backup = strings.TrimSpace(asked), strings.TrimSpace(backup)
+		if !ok || asked == "" || backup == "" {
+			return nil, fmt.Errorf("GATEWAY_BACKUP_MODELS: %q isn't asked=backup", pair)
+		}
+		if strings.HasPrefix(asked, "text-embedding") && backup != asked && !strings.HasSuffix(backup, "/"+asked) {
+			return nil, fmt.Errorf("GATEWAY_BACKUP_MODELS: %s may only fail over to the same model, not %s", asked, backup)
+		}
+		out[asked] = backup
+	}
+	return out, nil
+}
+
+func boolean(name string, fallback bool) bool {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ignoring %s=%q: not true or false\n", name, v)
+		return fallback
+	}
+	return b
 }
 
 func env(name, fallback string) string {

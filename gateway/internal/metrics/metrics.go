@@ -34,6 +34,10 @@ type Metrics struct {
 
 	Cache      *prometheus.CounterVec // result: hit, miss, bypass
 	CacheSaved *prometheus.CounterVec // model: what hits would have cost
+
+	Served    *prometheus.CounterVec // provider, endpoint: who answered each call
+	Failovers *prometheus.CounterVec // endpoint
+	Breaker   *prometheus.GaugeVec   // provider: 0 closed, 1 half-open, 2 open
 }
 
 // New registers the gateway's metrics, plus Go runtime and process metrics.
@@ -91,12 +95,25 @@ func New() *Metrics {
 			Name: "gateway_cache_saved_usd_total",
 			Help: "What the calls answered from the cache would have cost, at list price, by model.",
 		}, []string{"model"}),
+		Served: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_served_total",
+			Help: "Calls answered, by the provider that answered them (\"cache\" for cache hits).",
+		}, []string{"provider", "endpoint"}),
+		Failovers: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_failovers_total",
+			Help: "Calls answered by a provider other than the first one tried.",
+		}, []string{"endpoint"}),
+		Breaker: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "gateway_breaker_state",
+			Help: "Each provider's circuit breaker in this replica: 0 closed, 1 half-open, 2 open.",
+		}, []string{"provider"}),
 	}
 	m.Registry.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.Requests, m.Latency, m.TTFB, m.InFlight, m.Tokens, m.Upstream, m.UpLatency,
 		m.Cost, m.LimiterDegraded, m.Rejections, m.Cache, m.CacheSaved,
+		m.Served, m.Failovers, m.Breaker,
 	)
 	for _, result := range []string{"hit", "miss", "bypass"} {
 		m.Cache.WithLabelValues(result)

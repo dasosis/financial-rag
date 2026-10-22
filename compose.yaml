@@ -124,7 +124,7 @@ services:
     build: ./gateway
     image: financial-rag-llm-gateway
     env_file:
-      - path: .env.gateway             # OPENAI_API_KEY (and later the backup provider's)
+      - path: .env.gateway             # OPENAI_API_KEY, and OPENROUTER_API_KEY for the backup
         required: false                # the gateway refuses to start without its keys
     environment:
       LLM_GATEWAY_KEY: ${LLM_GATEWAY_KEY:-}

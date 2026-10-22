@@ -232,6 +232,24 @@ def test_benchmarks_bypass_the_cache(cached_gateway, monkeypatch):
     assert _cache_counts(cached_gateway) == {"hit": 0, "miss": 0, "bypass": 2}
 
 
+def test_with_openai_down_the_backup_answers(binaries, monkeypatch):
+    """OpenAI unreachable, the backup (the same fake, as OpenRouter) answers:
+    invoke, stream, and structured output, which the gateway checks against
+    the schema before it goes out. Embeddings have no backup: 503."""
+    with _running_gateway(binaries, OPENAI_BASE_URL=f"http://127.0.0.1:{_free_port()}/v1",
+                          OPENROUTER_API_KEY="sk-or-fake",
+                          OPENROUTER_BASE_URL=binaries["upstream"]) as gateway:
+        _use(gateway, monkeypatch)
+        llm = config.chat_model(temperature=0)
+        assert llm.invoke("What was revenue?").content.startswith("Fake answer")
+        assert "".join(c.content for c in llm.stream("What was revenue?")).startswith("Fake answer")
+        plan = llm.with_structured_output(router.QuestionPlan).invoke([("human", "Operating margin?")])
+        assert isinstance(plan, router.QuestionPlan)
+        with pytest.raises(config.ProvidersUnavailable):
+            config.embeddings().embed_query("Net income")
+        assert 'gateway_served_total{endpoint="chat",provider="openrouter"} 3' in _metrics(gateway)
+
+
 def test_a_wrong_key_is_refused(monkeypatch):
     import openai
 

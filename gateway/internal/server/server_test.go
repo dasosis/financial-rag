@@ -37,6 +37,8 @@ func testConfig(upstream string) config.Config {
 		Key: testKey, OpenAIKey: "sk-upstream", OpenAIBaseURL: upstream + "/v1",
 		ChatTimeout: 5 * time.Second, StreamTTFBTimeout: 2 * time.Second,
 		EmbedTimeout: 5 * time.Second, MaxBodyBytes: 1 << 20,
+		BreakerFailures: 5, BreakerCooldown: 30 * time.Second,
+		BackupModels: map[string]string{"gpt-4o-mini": "openai/gpt-4o-mini"}, BackupJSONSchema: true,
 	}
 }
 
@@ -278,27 +280,31 @@ func TestProviderErrorsArePassedOn(t *testing.T) {
 	}
 }
 
-func TestAProviderThatIsDownIsABadGateway(t *testing.T) {
+func TestAProviderThatIsDownIsProvidersUnavailable(t *testing.T) {
 	h := newHarness(t, fakeupstream.Options{}, func(c *config.Config) {
 		c.OpenAIBaseURL = "http://127.0.0.1:1/v1" // nothing listens there
 	})
 	resp := h.post("/v1/chat/completions", chatBody, nil)
-	if resp.StatusCode != http.StatusBadGateway {
+	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
-	// Retryable, as a failed call to OpenAI itself would be
-	if resp.Header.Get("x-should-retry") != "" {
-		t.Fatal("x-should-retry set on a retryable failure")
+	// The gateway already retried (and would have tried a backup): the app's
+	// client mustn't retry again, but tell the user
+	if resp.Header.Get("x-should-retry") != "false" {
+		t.Fatal("no x-should-retry: false")
+	}
+	if code := errorCode(t, resp); code != CodeProvidersUnavailable {
+		t.Fatalf("code %q", code)
 	}
 }
 
-func TestAStreamWithNoFirstByteInTimeIsAGatewayTimeout(t *testing.T) {
+func TestAStreamWithNoFirstByteInTimeIsProvidersUnavailable(t *testing.T) {
 	h := newHarness(t, fakeupstream.Options{Latency: time.Second}, func(c *config.Config) {
 		c.StreamTTFBTimeout = 100 * time.Millisecond
 	})
 	start := time.Now()
 	resp := h.post("/v1/chat/completions", streamBody, nil)
-	if resp.StatusCode != http.StatusGatewayTimeout {
+	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
 	if elapsed := time.Since(start); elapsed > 800*time.Millisecond {

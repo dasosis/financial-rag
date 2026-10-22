@@ -79,6 +79,49 @@ instead of the provider, at no cost to the consumer's budget or rate.
 `gateway_cache_requests_total{result}` gives the hit ratio, and
 `gateway_cache_saved_usd_total{model}` what the hits would have cost.
 
+## Providers, circuit breakers and fallback
+
+Calls go to OpenAI first and, if `OPENROUTER_API_KEY` is set, to OpenRouter when
+OpenAI fails, under the backup's name for the model (`GATEWAY_BACKUP_MODELS`,
+default `gpt-4o-mini=openai/gpt-4o-mini`; a model it doesn't list never fails over).
+
+- **A breaker per provider, per replica:** `GATEWAY_BREAKER_FAILURES` (5) failures
+  in a row open it, and after `GATEWAY_BREAKER_COOLDOWN` (30 s) one call goes
+  through as a probe (half-open): success closes it, failure opens it again. While
+  open, calls skip that provider.
+- **What counts as a failure:** 5xx, connection errors, timeouts and the
+  provider's own 429s. Never another 4xx: a 400 is the request's fault, and is
+  passed on as it came.
+- **Timeouts are to the first byte, per endpoint:** a plain chat call's first byte
+  is its whole answer (figure extraction runs long, `GATEWAY_CHAT_TIMEOUT` 180 s);
+  a stream's is the first byte of its body, not just its headers
+  (`GATEWAY_STREAM_TTFB_TIMEOUT` 30 s); embeddings `GATEWAY_EMBEDDINGS_TIMEOUT` 60 s.
+- **Never a switch after the first byte has gone back to the caller.** A stream
+  that breaks off mid-answer stays broken; the app sees it fail.
+- **Embeddings fail over only to an endpoint serving the same
+  `text-embedding-3-small`** (e.g. `text-embedding-3-small=openai/text-embedding-3-small`
+  in `GATEWAY_BACKUP_MODELS`; the gateway refuses to start with another model
+  there). By default there is none, so with OpenAI down embeddings get 503:
+  another model's vectors can't be compared with the stored index.
+- **Structured output from the backup is checked.** A backup asked for
+  `response_format: json_schema` is asked for its answer whole, even when the
+  caller streams, and the answer goes out only if it is JSON matching the schema
+  (replayed as SSE for a streamed call). Otherwise, or with
+  `GATEWAY_BACKUP_JSON_SCHEMA=false`, the call gets 503: never a malformed answer.
+- With nowhere else to go, a dropped connection or a 502 is retried once; a
+  provider 429 or a timeout is not.
+- When no provider can take a call: `503`, `error.code` `providers_unavailable`,
+  `x-should-retry: false`. The app degrades where it has a fallback (the
+  planner, reranker and follow-up rewrite) and otherwise tells the user.
+
+`X-Gateway-Provider` names who answered (`openai`, `openrouter`, or `cache`), as
+do `gateway_served_total{provider}` and `gateway_failovers_total`;
+`gateway_breaker_state{provider}` is 0 closed, 1 half-open, 2 open.
+
+`X-Force-Provider: openrouter` sends a call to that provider only, with no
+failover and nothing stored in the cache. Only callers with the internal key get
+that far; the benchmarks use it to score the backup on its own.
+
 ## Configuration
 
 | Variable | Default | |
@@ -98,6 +141,11 @@ instead of the provider, at no cost to the consumer's budget or rate.
 | `GATEWAY_DAILY_BUDGET_SYSTEM` | `0` (none) | per `system:` consumer |
 | `GATEWAY_COMPLETION_ESTIMATE` | `512` | answer tokens reserved for a call without `max_tokens` |
 | `GATEWAY_PRICES` | | JSON, e.g. `{"gpt-5-nano": {"input": 0.05, "cached": 0.005, "output": 0.4}}` (USD per million) |
+| `OPENROUTER_API_KEY` | (unset: no backup) | |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | |
+| `GATEWAY_BACKUP_MODELS` | `gpt-4o-mini=openai/gpt-4o-mini` | `asked=backup,…`; embeddings only to the same model |
+| `GATEWAY_BACKUP_JSON_SCHEMA` | `true` | the backup can follow `json_schema`; `false` makes such calls 503 instead |
+| `GATEWAY_BREAKER_FAILURES`, `GATEWAY_BREAKER_COOLDOWN` | `5`, `30s` | |
 | `GATEWAY_CACHE_REDIS_URL` | (unset: no cache) | `redis://llm-gateway-cache:6379/0` in compose |
 | `GATEWAY_CACHE_TTL` | `168h` | how long an answer is kept |
 | `GATEWAY_REPLICAS` | `3` | how many replicas share the limits; the fallback divides by it |

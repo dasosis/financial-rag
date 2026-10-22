@@ -1,14 +1,11 @@
 package server
 
 import (
-	"bufio"
-	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/dasosis/financial-rag/gateway/internal/cache"
@@ -25,6 +22,8 @@ type chatRequest struct {
 	// always asks for it (it is where token counts come from) and drops it again
 	// for callers who didn't.
 	clientUsage bool
+	// The schema of response_format json_schema (structured output), if any
+	schema json.RawMessage
 }
 
 var errBadRequest = errors.New("bad request")
@@ -40,6 +39,19 @@ func parseChat(body []byte) (*chatRequest, error) {
 	if raw, ok := req.fields["stream"]; ok {
 		if err := json.Unmarshal(raw, &req.stream); err != nil {
 			return nil, errBadRequest
+		}
+	}
+	var format struct {
+		Type       string `json:"type"`
+		JSONSchema struct {
+			Schema json.RawMessage `json:"schema"`
+		} `json:"json_schema"`
+	}
+	if raw, ok := req.fields["response_format"]; ok && json.Unmarshal(raw, &format) == nil &&
+		format.Type == "json_schema" {
+		req.schema = format.JSONSchema.Schema
+		if len(req.schema) == 0 {
+			req.schema = json.RawMessage("{}")
 		}
 	}
 	if !req.stream {
@@ -59,9 +71,29 @@ func parseChat(body []byte) (*chatRequest, error) {
 	return req, nil
 }
 
-func (r *chatRequest) encode() []byte {
-	out, _ := json.Marshal(r.fields)
-	return out
+// plan is how the call goes to one provider: under that provider's name for
+// the model. A backup answering a structured-output call is asked for its
+// answer whole, even if the caller streams, so the answer can be checked
+// against the schema before any of it goes out (and replayed as SSE after).
+func (r *chatRequest) plan(p *Provider) (outbound, bool) {
+	model, ok := p.Model(r.model)
+	if !ok {
+		return outbound{}, false
+	}
+	checked := r.schema != nil && !p.Primary()
+	if checked && !p.JSONSchema {
+		return outbound{}, false
+	}
+	fields := maps.Clone(r.fields)
+	fields["model"], _ = json.Marshal(model)
+	stream := r.stream
+	if checked {
+		delete(fields, "stream")
+		delete(fields, "stream_options")
+		stream = false
+	}
+	body, _ := json.Marshal(fields)
+	return outbound{body: body, stream: stream}, true
 }
 
 func (s *Server) chat(c *call) {
@@ -84,12 +116,8 @@ func (s *Server) chat(c *call) {
 	if !ok {
 		return
 	}
-	firstByte := s.cfg.ChatTimeout
-	if req.stream {
-		firstByte = s.cfg.StreamTTFBTimeout
-	}
-	resp, err := s.forward(c, "/chat/completions", req.encode(), firstByte)
-	if err != nil {
+	resp, p, out, ok := s.dispatch(c, "/chat/completions", req.plan)
+	if !ok {
 		s.settle(c, reservation, 0) // nothing was generated
 		return
 	}
@@ -99,30 +127,68 @@ func (s *Server) chat(c *call) {
 		s.settle(c, reservation, 0)
 		return
 	}
-	if req.stream {
+	// A forced call (a benchmark scoring the backup) stays out of the cache
+	store := lookup.store && c.r.Header.Get("X-Force-Provider") == ""
+
+	if out.stream {
 		var assembler *cache.Assembler
-		if lookup.store {
+		if store {
 			assembler = &cache.Assembler{}
 		}
 		result := s.relayStream(c, resp, req.clientUsage, assembler)
 		s.settle(c, reservation, s.account(req.model, result.usage))
+		s.served(p, c)
 		if assembler != nil && result.complete() {
 			if completion, ok := assembler.Completion(); ok {
 				s.cacheStore(c, lookup.key, completion)
 			}
 		}
 		s.log.Info("answered", "request_id", c.requestID, "endpoint", c.endpoint, "stream", true,
-			"model", req.model, "finished", result.finish, "complete", result.complete(),
-			"ms", time.Since(c.start).Milliseconds())
+			"provider", p.Name, "model", req.model, "finished", result.finish,
+			"complete", result.complete(), "ms", time.Since(c.start).Milliseconds())
 		return
 	}
-	answer, used := s.relayJSON(c, resp)
+
+	answer, used, err := readAnswer(resp)
+	if err != nil {
+		p.Breaker.Failure()
+		s.settle(c, reservation, -1)
+		s.fail(c, http.StatusServiceUnavailable, "api_error", CodeProvidersUnavailable,
+			"The model provider's answer broke off.")
+		return
+	}
 	s.settle(c, reservation, s.account(req.model, used))
-	if lookup.store && answer != nil {
+	if req.schema != nil && !p.Primary() {
+		if err := checkStructured(answer, req.schema); err != nil {
+			// Never pass on a malformed structured answer: the app would fail to
+			// parse it, or worse, act on it. 503, as if no provider could answer.
+			p.Breaker.Failure()
+			s.log.Warn("backup's structured output didn't match the schema",
+				"request_id", c.requestID, "provider", p.Name, "error", err.Error())
+			s.fail(c, http.StatusServiceUnavailable, "api_error", CodeProvidersUnavailable,
+				"The backup provider couldn't produce the structured output asked for.")
+			return
+		}
+	}
+	if req.stream { // asked whole from a backup to check it: replay it as the stream asked for
+		events, err := cache.Replay(answer, req.clientUsage)
+		if err != nil {
+			s.fail(c, http.StatusServiceUnavailable, "api_error", CodeProvidersUnavailable,
+				"The model provider's answer couldn't be streamed.")
+			return
+		}
+		s.writeSSE(c, events)
+	} else {
+		copyHeaders(c.w.Header(), resp.Header, "Content-Type", "x-request-id")
+		c.w.WriteHeader(http.StatusOK)
+		_, _ = c.w.Write(answer)
+	}
+	s.served(p, c)
+	if store {
 		s.cacheStore(c, lookup.key, answer)
 	}
-	s.log.Info("answered", "request_id", c.requestID, "endpoint", c.endpoint, "stream", false,
-		"model", req.model, "ms", time.Since(c.start).Milliseconds())
+	s.log.Info("answered", "request_id", c.requestID, "endpoint", c.endpoint, "stream", req.stream,
+		"provider", p.Name, "model", req.model, "ms", time.Since(c.start).Milliseconds())
 }
 
 // estimate is the call's likely usage before it is made: its prompt at about
@@ -159,43 +225,14 @@ func (s *Server) readBody(c *call) ([]byte, bool) {
 	return body, true
 }
 
-// forward sends the call to the provider. On failure it has already answered
-// the caller (and returns the error only so the handler stops).
-func (s *Server) forward(c *call, path string, body []byte, firstByte time.Duration) (*upstreamResponse, error) {
-	p := s.provider
-	sent := time.Now()
-	resp, err := p.send(c.r.Context(), path, body, firstByte)
-	if err != nil {
-		s.metrics.Upstream.WithLabelValues(p.Name, c.endpoint, "error").Inc()
-		s.upstreamFailed(c, err)
-		return nil, err
-	}
-	s.metrics.UpLatency.WithLabelValues(p.Name, c.endpoint).Observe(time.Since(sent).Seconds())
-	s.metrics.Upstream.WithLabelValues(p.Name, c.endpoint, strconv.Itoa(resp.StatusCode)).Inc()
-	return resp, nil
+// served counts a response a provider gave, by provider.
+func (s *Server) served(p *Provider, c *call) {
+	s.metrics.Served.WithLabelValues(p.Name, c.endpoint).Inc()
 }
 
-// upstreamFailed answers a call whose provider couldn't be reached. These are
-// 502/504 without x-should-retry, so the app's client retries them as it
-// would a failed call to OpenAI itself.
-func (s *Server) upstreamFailed(c *call, err error) {
-	switch {
-	case c.r.Context().Err() != nil:
-		// The caller hung up; there is no one to answer. 499 as nginx logs it.
-		c.w.code = 499
-	case errors.Is(err, errFirstByteTimeout), errors.Is(err, context.DeadlineExceeded):
-		s.fail(c, http.StatusGatewayTimeout, "api_error", "upstream_timeout",
-			"The model provider didn't answer in time.")
-	default:
-		s.log.Warn("provider unreachable", "request_id", c.requestID, "error", err.Error())
-		s.fail(c, http.StatusBadGateway, "api_error", "upstream_unavailable",
-			"Couldn't reach the model provider.")
-	}
-}
-
-// relayError passes a provider's error response on as it came.
+// relayError passes a provider's error response (a 4xx other than 429) on as it came.
 func (s *Server) relayError(c *call, resp *upstreamResponse) {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, _ := io.ReadAll(io.LimitReader(resp.body, 1<<20))
 	copyHeaders(c.w.Header(), resp.Header, "Content-Type", "Retry-After", "x-request-id")
 	c.w.WriteHeader(resp.StatusCode)
 	_, _ = c.w.Write(body)
@@ -203,24 +240,20 @@ func (s *Server) relayError(c *call, resp *upstreamResponse) {
 		"status", resp.StatusCode)
 }
 
-// relayJSON passes a provider's JSON answer on, and returns it and its usage.
-func (s *Server) relayJSON(c *call, resp *upstreamResponse) ([]byte, usage.Usage) {
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+// readAnswer reads a provider's JSON answer and the usage in it.
+func readAnswer(resp *upstreamResponse) ([]byte, usage.Usage, error) {
+	body, err := io.ReadAll(io.LimitReader(resp.body, 64<<20))
 	if err != nil {
-		s.upstreamFailed(c, err)
-		return nil, usage.Usage{}
+		return nil, usage.Usage{}, err
 	}
 	var parsed struct {
 		Usage *usage.Usage `json:"usage"`
 	}
 	_ = json.Unmarshal(body, &parsed)
-	copyHeaders(c.w.Header(), resp.Header, "Content-Type", "x-request-id")
-	c.w.WriteHeader(http.StatusOK)
-	_, _ = c.w.Write(body)
 	if parsed.Usage == nil {
-		return body, usage.Usage{}
+		return body, usage.Usage{}, nil
 	}
-	return body, *parsed.Usage
+	return body, *parsed.Usage, nil
 }
 
 func copyHeaders(dst, src http.Header, names ...string) {
@@ -229,123 +262,4 @@ func copyHeaders(dst, src http.Header, names ...string) {
 			dst.Set(name, v)
 		}
 	}
-}
-
-// streamResult is what a relayed stream turned out to be.
-type streamResult struct {
-	usage  usage.Usage
-	finish string // the last finish_reason seen: "stop", "length", "tool_calls"…
-	done   bool   // "data: [DONE]" arrived
-	err    error  // reading the provider or writing to the caller failed
-}
-
-// complete is true for a stream that ended normally: a finish reason, [DONE],
-// and nothing broken on the way.
-func (r streamResult) complete() bool {
-	return r.err == nil && r.done && r.finish != ""
-}
-
-// relayStream copies a provider's SSE stream to the caller event by event,
-// flushing each at once (never buffering the answer). The usage chunk is read
-// for its token counts and dropped unless the caller asked for it.
-//
-// A non-nil assembler is given every chunk, to rebuild the answer for the cache.
-func (s *Server) relayStream(c *call, resp *upstreamResponse, clientUsage bool, assembler *cache.Assembler) streamResult {
-	h := c.w.Header()
-	h.Set("Content-Type", "text/event-stream")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("X-Accel-Buffering", "no")
-	copyHeaders(h, resp.Header, "x-request-id")
-	c.w.WriteHeader(http.StatusOK)
-	c.w.Flush()
-
-	var result streamResult
-	reader := bufio.NewReaderSize(resp.Body, 64<<10)
-	for {
-		event, err := readEvent(reader)
-		if len(event) > 0 {
-			keep := true
-			if data, ok := eventData(event); ok {
-				keep = inspectChunk(data, &result, clientUsage)
-				if assembler != nil && string(bytes.TrimSpace(data)) != "[DONE]" {
-					assembler.Add(data)
-				}
-			}
-			if keep {
-				if _, werr := c.w.Write(event); werr != nil {
-					result.err = werr
-					return result
-				}
-				c.w.Flush()
-			}
-		}
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				result.err = err
-			} else if !result.done {
-				result.err = io.ErrUnexpectedEOF
-			}
-			return result
-		}
-	}
-}
-
-// readEvent reads one SSE event: lines up to and including a blank line.
-func readEvent(r *bufio.Reader) ([]byte, error) {
-	var event []byte
-	for {
-		line, err := r.ReadBytes('\n')
-		event = append(event, line...)
-		if err != nil {
-			return event, err
-		}
-		if len(bytes.TrimRight(line, "\r\n")) == 0 {
-			return event, nil
-		}
-	}
-}
-
-// eventData is the payload of an event's data lines, joined.
-func eventData(event []byte) ([]byte, bool) {
-	var data [][]byte
-	for _, line := range bytes.Split(event, []byte("\n")) {
-		line = bytes.TrimRight(line, "\r")
-		if rest, ok := bytes.CutPrefix(line, []byte("data:")); ok {
-			data = append(data, bytes.TrimPrefix(rest, []byte(" ")))
-		}
-	}
-	if len(data) == 0 {
-		return nil, false
-	}
-	return bytes.Join(data, []byte("\n")), true
-}
-
-// inspectChunk notes what a chunk says (usage, finish reason, the end) and
-// says whether to pass it on.
-func inspectChunk(data []byte, result *streamResult, clientUsage bool) bool {
-	if string(bytes.TrimSpace(data)) == "[DONE]" {
-		result.done = true
-		return true
-	}
-	var chunk struct {
-		Choices []struct {
-			FinishReason *string `json:"finish_reason"`
-		} `json:"choices"`
-		Usage *usage.Usage `json:"usage"`
-	}
-	if json.Unmarshal(data, &chunk) != nil {
-		return true
-	}
-	for _, choice := range chunk.Choices {
-		if choice.FinishReason != nil && *choice.FinishReason != "" {
-			result.finish = *choice.FinishReason
-		}
-	}
-	if chunk.Usage != nil {
-		result.usage = *chunk.Usage
-		if len(chunk.Choices) == 0 && !clientUsage {
-			return false
-		}
-	}
-	return true
 }
