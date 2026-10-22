@@ -151,6 +151,42 @@ cover pages (`internal/redact/testdata`; `make_fixtures.py` regenerates it).
 are never logged, stored or put in a metric. `GATEWAY_REDACT` picks the kinds
 (`all` by default, `off`, or e.g. `email,phone`).
 
+## Observability
+
+`/metrics` (internal port 9090) on each replica; compose's `metrics` profile runs
+Prometheus, scraping all three directly (`observability/prometheus.yml`), and
+Grafana with its datasource and dashboard provisioned from
+`observability/grafana` (edit the JSON, not the UI). The dashboard: request rate,
+errors by code, latency and time to first byte (p50/p95/p99; buckets to 120 s),
+cache hit ratio, cost and cost saved, tokens by model, which provider served,
+breakers per replica, the limiter's state, limit and budget rejections, and
+redactions. Metric labels are endpoints, codes, models, providers and kinds:
+never a consumer or user id.
+
+| Metric | |
+| --- | --- |
+| `gateway_requests_total{endpoint,code}`, `gateway_request_duration_seconds`, `gateway_time_to_first_byte_seconds` | traffic and latency |
+| `gateway_tokens_total{model,kind}`, `gateway_cost_usd_total{model}` | usage, at list price |
+| `gateway_cache_requests_total{result}`, `gateway_cache_saved_usd_total{model}` | the cache |
+| `gateway_served_total{provider,endpoint}`, `gateway_failovers_total`, `gateway_breaker_state{provider}`, `gateway_upstream_requests_total{provider,endpoint,code}` | providers |
+| `gateway_limiter_degraded`, `gateway_limit_rejections_total{reason}` | limits and budgets |
+| `gateway_redactions_total{type}` | redaction (counts only) |
+
+## Load test
+
+`loadtest` drives the gateway with concurrent calls; run it against the fake
+upstream only (each call to OpenAI would cost money):
+
+```bash
+go run ./cmd/fakeupstream -addr 0.0.0.0:9100 -latency 20ms        # OPENAI_BASE_URL for the gateway
+go run ./loadtest -url http://localhost:9100/v1 -n 5000 -c 20      # the fake alone: the baseline
+go run ./loadtest -url http://llm-gateway:8080/v1 -n 5000 -c 20    # through the gateway
+go run ./loadtest -scenario cache -n 5000 -c 20                     # cache hits
+go run ./loadtest -scenario limit -duration 60s -c 50 -rate 600 -burst 60   # the global limit
+```
+
+The main README's "LLM gateway" section has the numbers.
+
 ## Configuration
 
 | Variable | Default | |

@@ -1,0 +1,14 @@
+# Prometheus for the LLM gateway (compose profile "metrics"). It scrapes each
+# replica's internal /metrics port directly, not through the load balancer,
+# so every replica is seen (breakers and the limiter fallback are per replica).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: llm-gateway
+    static_configs:
+      - targets:
+          - llm-gateway-1:9090
+          - llm-gateway-2:9090
+          - llm-gateway-3:9090
