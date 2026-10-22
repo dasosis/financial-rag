@@ -79,6 +79,44 @@ services:
       - "127.0.0.1:16686:16686"
     mem_limit: 300m
 
+  # The LLM gateway (gateway/), excluded from `up` by its profile: three replicas
+  # behind an internal load balancer, between the API and the model providers.
+  # Start it with `docker compose --profile gateway up -d`, and point the API at
+  # it in .env: LLM_GATEWAY_URL=http://llm-gateway:8080/v1 and LLM_GATEWAY_KEY.
+  # The provider keys go in .env.gateway, which only the gateway reads, so the
+  # OpenAI key no longer has to be in the API's .env. Nothing here is published
+  # to the host. See the README's "LLM gateway" section.
+  llm-gateway:
+    profiles: ["gateway"]
+    image: caddy:2.10.0
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on: [llm-gateway-1, llm-gateway-2, llm-gateway-3]
+    mem_limit: 40m
+    restart: unless-stopped
+
+  llm-gateway-1: &llm-gateway
+    profiles: ["gateway"]
+    build: ./gateway
+    image: financial-rag-llm-gateway
+    env_file:
+      - path: .env.gateway             # OPENAI_API_KEY (and later the backup provider's)
+        required: false                # the gateway refuses to start without its keys
+    environment:
+      LLM_GATEWAY_KEY: ${LLM_GATEWAY_KEY:-}
+      GOMEMLIMIT: 30MiB                # collect garbage before mem_limit is near
+    healthcheck:
+      test: ["CMD", "/gateway", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    mem_limit: 40m
+    restart: unless-stopped
+
+  llm-gateway-2: *llm-gateway
+  llm-gateway-3: *llm-gateway
+
   # One-shot job, excluded from `docker compose up` by its profile.
   # PDFs are bind-mounted read-only from ./data on the host.
   ingest:

@@ -6,7 +6,11 @@
 
 # Secrets - the key enters the container via env_file, never the image
 .env
+.env.gateway
 .streamlit
+
+# The LLM gateway has its own image (gateway/Dockerfile)
+gateway
 
 # Local state the image must not contain: the store is a volume, PDFs are
 # bind-mounted into the ingest job

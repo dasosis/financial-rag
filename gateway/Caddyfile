@@ -1,0 +1,25 @@
+# The gateway's internal load balancer (compose service `llm-gateway`). The API
+# calls http://llm-gateway:8080/v1; nothing here is published to the host.
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+:8080 {
+	reverse_proxy llm-gateway-1:8080 llm-gateway-2:8080 llm-gateway-3:8080 {
+		lb_policy round_robin
+		# A replica that is down or restarting: try the next one. Caddy only
+		# retries a call it couldn't connect for, so nothing is sent twice.
+		lb_try_duration 3s
+		# Pass each streamed chunk on the moment it arrives
+		flush_interval -1
+		# Out of rotation while /readyz fails, e.g. a replica shutting down
+		health_uri /readyz
+		health_interval 5s
+		health_timeout 2s
+		transport http {
+			dial_timeout 2s
+		}
+	}
+}
