@@ -50,6 +50,35 @@ falls back to limits of its own at a third of the configured ones
 (`GATEWAY_REPLICAS`), sets `gateway_limiter_degraded` to 1, logs it once, and
 goes back to Redis as soon as it answers a ping.
 
+## Response cache
+
+Repeats of a temperature-0 chat call are answered from a Redis of their own
+(`GATEWAY_CACHE_REDIS_URL`; `allkeys-lru`, 64 MB, entries expire after 7 days)
+instead of the provider, at no cost to the consumer's budget or rate.
+
+- **Exact matches only.** The key is the SHA-256 of the canonical JSON (sorted
+  keys, one spelling per number) of every field that can change the answer:
+  model, messages, temperature, tools, response_format, max_tokens, seed, top_p
+  and the rest. Only delivery fields (`stream`, `stream_options`, `user`,
+  `metadata`, `store`, …) are left out. Never "similar" questions: "revenue in
+  2023" and "revenue in 2024" embed almost identically, and a semantic cache would
+  answer one with the other's figures.
+- **Only temperature 0 and one answer** (`n` absent or 1); anything else is meant to vary.
+- **Only answers that finished normally** (`stop`, `tool_calls`): never an error,
+  a stream that broke off, or an answer cut at `max_tokens`. A streamed answer is
+  assembled into the plain JSON form before it is stored, and a streamed hit is
+  replayed as SSE from it (with the usage chunk if the caller asked for one), so
+  either kind of call can answer the other.
+- **`Cache-Control: no-cache`** skips the lookup (the benchmarks send it: a cached
+  answer would score the cache); `no-store` also keeps the answer out.
+- Only the response body is stored, under a hash: never the prompt. Prompts are
+  never logged either.
+- A cache that is down or slow is a miss; the call goes to the provider.
+
+`X-Gateway-Cache` says `hit`, `miss` or `bypass`.
+`gateway_cache_requests_total{result}` gives the hit ratio, and
+`gateway_cache_saved_usd_total{model}` what the hits would have cost.
+
 ## Configuration
 
 | Variable | Default | |
@@ -69,6 +98,8 @@ goes back to Redis as soon as it answers a ping.
 | `GATEWAY_DAILY_BUDGET_SYSTEM` | `0` (none) | per `system:` consumer |
 | `GATEWAY_COMPLETION_ESTIMATE` | `512` | answer tokens reserved for a call without `max_tokens` |
 | `GATEWAY_PRICES` | | JSON, e.g. `{"gpt-5-nano": {"input": 0.05, "cached": 0.005, "output": 0.4}}` (USD per million) |
+| `GATEWAY_CACHE_REDIS_URL` | (unset: no cache) | `redis://llm-gateway-cache:6379/0` in compose |
+| `GATEWAY_CACHE_TTL` | `168h` | how long an answer is kept |
 | `GATEWAY_REPLICAS` | `3` | how many replicas share the limits; the fallback divides by it |
 
 ## Development

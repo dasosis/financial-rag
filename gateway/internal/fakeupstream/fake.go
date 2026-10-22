@@ -200,6 +200,13 @@ func (f *Fake) model(body map[string]any, opts Options) string {
 
 func (f *Fake) chat(w http.ResponseWriter, r *http.Request, body map[string]any, opts Options) {
 	content := f.content(body)
+	// max_tokens, as a word count here: an answer cut off at it finishes "length"
+	finish := "stop"
+	if limit, ok := body["max_tokens"].(float64); ok {
+		if words := strings.SplitAfter(content, " "); len(words) > int(limit) {
+			content, finish = strings.Join(words[:int(limit)], ""), "length"
+		}
+	}
 	model := f.model(body, opts)
 	prompt := promptTokens(body)
 	completion := len(content)/4 + 1
@@ -217,7 +224,7 @@ func (f *Fake) chat(w http.ResponseWriter, r *http.Request, body map[string]any,
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": id, "object": "chat.completion", "created": created, "model": model,
 			"choices": []any{map[string]any{
-				"index": 0, "finish_reason": "stop",
+				"index": 0, "finish_reason": finish,
 				"message": map[string]any{"role": "assistant", "content": content, "refusal": nil},
 			}},
 			"usage": usage,
@@ -272,7 +279,7 @@ func (f *Fake) chat(w http.ResponseWriter, r *http.Request, body map[string]any,
 			return // the connection drops mid-answer
 		}
 	}
-	if !send(chunk(map[string]any{}, "stop")) {
+	if !send(chunk(map[string]any{}, finish)) {
 		return
 	}
 	if wantUsage {

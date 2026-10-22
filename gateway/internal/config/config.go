@@ -40,6 +40,10 @@ type Config struct {
 	// max_tokens: its budget reservation until the provider reports usage.
 	CompletionEstimate int
 	Prices             string // GATEWAY_PRICES: JSON on top of the built-in price table
+
+	// The response cache (package cache), on a Redis of its own. Unset: no cache.
+	CacheRedisURL string
+	CacheTTL      time.Duration
 }
 
 // The default daily budget per user: about 20 questions at the ~16,000 input
@@ -72,6 +76,9 @@ func FromEnv() (Config, error) {
 		},
 		CompletionEstimate: integer("GATEWAY_COMPLETION_ESTIMATE", 512),
 		Prices:             os.Getenv("GATEWAY_PRICES"),
+
+		CacheRedisURL: strings.TrimSpace(os.Getenv("GATEWAY_CACHE_REDIS_URL")),
+		CacheTTL:      duration("GATEWAY_CACHE_TTL", 7*24*time.Hour),
 	}
 	var errs []error
 	if len(c.Key) < 16 {

@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dasosis/financial-rag/gateway/internal/cache"
 	"github.com/dasosis/financial-rag/gateway/internal/config"
 	"github.com/dasosis/financial-rag/gateway/internal/limits"
 	"github.com/dasosis/financial-rag/gateway/internal/metrics"
@@ -49,9 +50,12 @@ type Server struct {
 	log      *slog.Logger
 	provider *Provider
 	limiter  *limits.Limiter
+	cache    *cache.Cache
 	prices   *pricing.Table
 	ready    atomic.Bool
 	unpriced sync.Map // models already warned about
+	// when the cache's trouble was last logged (unix seconds)
+	cacheWarned atomic.Int64
 }
 
 // Deps are what a server works with besides its configuration.
@@ -59,6 +63,7 @@ type Deps struct {
 	Metrics *metrics.Metrics
 	Log     *slog.Logger
 	Limiter *limits.Limiter // nil: no limits or budgets
+	Cache   *cache.Cache    // nil: no response cache
 	Prices  *pricing.Table  // nil: the built-in price table
 }
 
@@ -68,7 +73,7 @@ func New(cfg config.Config, d Deps) *Server {
 		d.Prices, _ = pricing.New("")
 	}
 	s := &Server{
-		cfg: cfg, metrics: d.Metrics, log: d.Log, limiter: d.Limiter, prices: d.Prices,
+		cfg: cfg, metrics: d.Metrics, log: d.Log, limiter: d.Limiter, cache: d.Cache, prices: d.Prices,
 		provider: NewProvider("openai", cfg.OpenAIBaseURL, cfg.OpenAIKey),
 	}
 	s.ready.Store(true)

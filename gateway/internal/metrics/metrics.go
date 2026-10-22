@@ -31,6 +31,9 @@ type Metrics struct {
 	Cost            *prometheus.CounterVec // model: dollars at list price
 	LimiterDegraded prometheus.Gauge
 	Rejections      *prometheus.CounterVec // reason: consumer_rate, global_rate, budget
+
+	Cache      *prometheus.CounterVec // result: hit, miss, bypass
+	CacheSaved *prometheus.CounterVec // model: what hits would have cost
 }
 
 // New registers the gateway's metrics, plus Go runtime and process metrics.
@@ -80,13 +83,24 @@ func New() *Metrics {
 			Name: "gateway_limit_rejections_total",
 			Help: "Calls refused by a limit: consumer_rate, global_rate or budget.",
 		}, []string{"reason"}),
+		Cache: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_cache_requests_total",
+			Help: "Cacheable chat calls by result: hit, miss, or bypass (Cache-Control: no-cache).",
+		}, []string{"result"}),
+		CacheSaved: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_cache_saved_usd_total",
+			Help: "What the calls answered from the cache would have cost, at list price, by model.",
+		}, []string{"model"}),
 	}
 	m.Registry.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.Requests, m.Latency, m.TTFB, m.InFlight, m.Tokens, m.Upstream, m.UpLatency,
-		m.Cost, m.LimiterDegraded, m.Rejections,
+		m.Cost, m.LimiterDegraded, m.Rejections, m.Cache, m.CacheSaved,
 	)
+	for _, result := range []string{"hit", "miss", "bypass"} {
+		m.Cache.WithLabelValues(result)
+	}
 	for _, reason := range []limits.Reason{limits.ConsumerRate, limits.GlobalRate, limits.Budget} {
 		m.Rejections.WithLabelValues(string(reason)) // show 0 before the first
 	}

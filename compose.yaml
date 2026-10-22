@@ -108,6 +108,17 @@ services:
     mem_limit: 32m
     restart: unless-stopped
 
+  # The response cache: exact repeats of temperature-0 calls (see gateway/README.md).
+  # A separate Redis, because this one evicts (allkeys-lru, 64 MB) and the limits
+  # must never; entries also expire after 7 days. Nothing is persisted: it's a cache.
+  llm-gateway-cache:
+    profiles: ["gateway"]
+    image: redis:7.4.1-alpine
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru",
+              "--appendonly", "no", "--save", ""]
+    mem_limit: 96m
+    restart: unless-stopped
+
   llm-gateway-1: &llm-gateway
     profiles: ["gateway"]
     build: ./gateway
@@ -118,9 +129,10 @@ services:
     environment:
       LLM_GATEWAY_KEY: ${LLM_GATEWAY_KEY:-}
       GATEWAY_LIMITS_REDIS_URL: redis://llm-gateway-limits:6379/0
+      GATEWAY_CACHE_REDIS_URL: redis://llm-gateway-cache:6379/0
       GATEWAY_REPLICAS: "3"            # without Redis, each keeps a third of the limits
       GOMEMLIMIT: 30MiB                # collect garbage before mem_limit is near
-    depends_on: [llm-gateway-limits]
+    depends_on: [llm-gateway-limits, llm-gateway-cache]
     healthcheck:
       test: ["CMD", "/gateway", "-healthcheck"]
       interval: 10s

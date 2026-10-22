@@ -28,11 +28,22 @@ func (m *fakeMetrics) Rejected(r Reason) {
 
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
+type quietRedis struct{}
+
+func (quietRedis) Printf(context.Context, string, ...interface{}) {}
+
+func TestMain(m *testing.M) {
+	redis.SetLogger(quietRedis{}) // the dial failures some tests cause on purpose
+	os.Exit(m.Run())
+}
+
 func newRedis(t *testing.T) (*miniredis.Miniredis, *redis.Client) {
 	t.Helper()
 	m := miniredis.RunT(t)
 	m.SetTime(time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC))
-	rdb := redis.NewClient(FailFast(&redis.Options{Addr: m.Addr()}))
+	// Generous timeouts: these tests are about atomicity, and a slow test
+	// machine mustn't make a replica fall back (TestWithoutRedis… covers that)
+	rdb := redis.NewClient(&redis.Options{Addr: m.Addr(), ReadTimeout: 10 * time.Second})
 	t.Cleanup(func() { _ = rdb.Close() })
 	return m, rdb
 }
@@ -198,7 +209,9 @@ func TestReservationsAtOnceNeverOverspend(t *testing.T) {
 }
 
 func TestWithoutRedisEachReplicaKeepsAThirdOfTheLimits(t *testing.T) {
-	m, rdb := newRedis(t)
+	m, _ := newRedis(t)
+	rdb := redis.NewClient(FailFast(&redis.Options{Addr: m.Addr()}))
+	t.Cleanup(func() { _ = rdb.Close() })
 	l, metrics := newLimiter(t, rdb, Settings{GlobalRate: 0.001, GlobalBurst: 30, UserBudget: 900, Replicas: 3})
 	ctx := context.Background()
 	m.Close()
