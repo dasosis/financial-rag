@@ -71,23 +71,21 @@ func (s *Server) serveCached(c *call, req *chatRequest, body []byte) {
 	if json.Unmarshal(body, &stored) == nil && stored.Usage != nil {
 		s.metrics.CacheSaved.WithLabelValues(req.model).Add(s.prices.Cost(req.model, *stored.Usage))
 	}
+	h.Set("X-Gateway-Provider", "cache")
 	if req.stream {
 		events, err := cache.Replay(body, req.clientUsage)
-		if err != nil { // can't happen for what Put stores; answer as a provider error would
-			s.fail(c, http.StatusBadGateway, "api_error", "upstream_unavailable", "Couldn't replay the cached answer.")
+		if err != nil { // can't happen for what Put stores
+			s.fail(c, http.StatusServiceUnavailable, "api_error", CodeProvidersUnavailable,
+				"Couldn't replay the cached answer.")
 			return
 		}
-		h.Set("Content-Type", "text/event-stream")
-		h.Set("Cache-Control", "no-cache")
-		h.Set("X-Accel-Buffering", "no")
-		c.w.WriteHeader(http.StatusOK)
-		_, _ = c.w.Write(events)
-		c.w.Flush()
+		s.writeSSE(c, events)
 	} else {
 		h.Set("Content-Type", "application/json")
 		c.w.WriteHeader(http.StatusOK)
 		_, _ = c.w.Write(body)
 	}
+	s.metrics.Served.WithLabelValues("cache", c.endpoint).Inc()
 	s.log.Info("answered", "request_id", c.requestID, "endpoint", c.endpoint, "stream", req.stream,
 		"model", req.model, "cache", "hit", "ms", time.Since(c.start).Milliseconds())
 }

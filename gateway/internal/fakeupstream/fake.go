@@ -30,6 +30,10 @@ type Options struct {
 	Model string
 	// Dimensions of each embedding (default 1536, as text-embedding-3-small)
 	Dimensions int
+	// StallBody: a stream's headers go out at once, its first byte this much later
+	StallBody time.Duration
+	// BadJSON: structured output that isn't JSON, as a weaker model might write
+	BadJSON bool
 }
 
 // Fake is an http.Handler serving /v1/chat/completions and /v1/embeddings.
@@ -39,6 +43,7 @@ type Fake struct {
 	// fail, when non-zero, is the status every request gets
 	fail      atomic.Int32
 	failCode  atomic.Value // string
+	failTimes atomic.Int32 // with fail: how many more requests fail (0: all)
 	truncate  atomic.Bool  // end streams without a finish_reason or [DONE]
 	calls     atomic.Int64
 	lastMu    sync.Mutex
@@ -73,8 +78,16 @@ func (f *Fake) options() Options {
 // Fail makes every request answer with status and an OpenAI-style error with
 // this code; Fail(0, "") goes back to answering normally.
 func (f *Fake) Fail(status int, code string) {
+	f.failTimes.Store(0)
 	f.fail.Store(int32(status))
 	f.failCode.Store(code)
+}
+
+// FailNext makes only the next n requests fail so.
+func (f *Fake) FailNext(n int, status int, code string) {
+	f.failCode.Store(code)
+	f.fail.Store(int32(status))
+	f.failTimes.Store(int32(n))
 }
 
 // Truncate makes streams stop before their finish_reason and [DONE].
@@ -117,6 +130,11 @@ func (f *Fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if status := int(f.fail.Load()); status != 0 {
+		if left := f.failTimes.Load(); left > 0 {
+			if f.failTimes.Add(-1) == 0 {
+				f.fail.Store(0)
+			}
+		}
 		code, _ := f.failCode.Load().(string)
 		writeError(w, status, code, "fake failure")
 		return
@@ -176,8 +194,11 @@ func promptTokens(body map[string]any) int {
 	return len(raw)/4 + 1
 }
 
-func (f *Fake) content(body map[string]any) string {
+func (f *Fake) content(body map[string]any, opts Options) string {
 	if rf, ok := body["response_format"].(map[string]any); ok && rf["type"] == "json_schema" {
+		if opts.BadJSON {
+			return `{"route": "calculation", "metrics": [`
+		}
 		if js, ok := rf["json_schema"].(map[string]any); ok {
 			schema, _ := js["schema"].(map[string]any)
 			out, _ := json.Marshal(Instance(schema, schema))
@@ -199,7 +220,7 @@ func (f *Fake) model(body map[string]any, opts Options) string {
 }
 
 func (f *Fake) chat(w http.ResponseWriter, r *http.Request, body map[string]any, opts Options) {
-	content := f.content(body)
+	content := f.content(body, opts)
 	// max_tokens, as a word count here: an answer cut off at it finishes "length"
 	finish := "stop"
 	if limit, ok := body["max_tokens"].(float64); ok {
@@ -240,6 +261,16 @@ func (f *Fake) chat(w http.ResponseWriter, r *http.Request, body map[string]any,
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
+	if opts.StallBody > 0 {
+		if flusher != nil {
+			flusher.Flush() // the headers, now; the body only after the stall
+		}
+		select {
+		case <-time.After(opts.StallBody):
+		case <-r.Context().Done():
+			return
+		}
+	}
 	send := func(chunk map[string]any) bool {
 		raw, _ := json.Marshal(chunk)
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", raw); err != nil {

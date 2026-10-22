@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dasosis/financial-rag/gateway/internal/breaker"
 	"github.com/dasosis/financial-rag/gateway/internal/cache"
 	"github.com/dasosis/financial-rag/gateway/internal/config"
 	"github.com/dasosis/financial-rag/gateway/internal/limits"
@@ -45,15 +46,16 @@ var consumerRE = regexp.MustCompile(`^(user|system):[A-Za-z0-9._:-]{1,128}$`)
 
 // Server answers the gateway's endpoints.
 type Server struct {
-	cfg      config.Config
-	metrics  *metrics.Metrics
-	log      *slog.Logger
-	provider *Provider
-	limiter  *limits.Limiter
-	cache    *cache.Cache
-	prices   *pricing.Table
-	ready    atomic.Bool
-	unpriced sync.Map // models already warned about
+	cfg     config.Config
+	metrics *metrics.Metrics
+	log     *slog.Logger
+	// The providers in the order calls try them: OpenAI, then the backup
+	providers []*Provider
+	limiter   *limits.Limiter
+	cache     *cache.Cache
+	prices    *pricing.Table
+	ready     atomic.Bool
+	unpriced  sync.Map // models already warned about
 	// when the cache's trouble was last logged (unix seconds)
 	cacheWarned atomic.Int64
 }
@@ -67,17 +69,34 @@ type Deps struct {
 	Prices  *pricing.Table  // nil: the built-in price table
 }
 
-// New builds a server that sends calls to OpenAI.
+// New builds a server that sends calls to OpenAI, and to OpenRouter when
+// OpenAI fails if it has a key for it.
 func New(cfg config.Config, d Deps) *Server {
 	if d.Prices == nil {
 		d.Prices, _ = pricing.New("")
 	}
 	s := &Server{
 		cfg: cfg, metrics: d.Metrics, log: d.Log, limiter: d.Limiter, cache: d.Cache, prices: d.Prices,
-		provider: NewProvider("openai", cfg.OpenAIBaseURL, cfg.OpenAIKey),
+	}
+	s.providers = []*Provider{NewProvider("openai", cfg.OpenAIBaseURL, cfg.OpenAIKey, nil, s.breaker("openai"))}
+	if cfg.OpenRouterKey != "" {
+		backup := NewProvider("openrouter", cfg.OpenRouterBaseURL, cfg.OpenRouterKey, cfg.BackupModels,
+			s.breaker("openrouter"))
+		backup.JSONSchema = cfg.BackupJSONSchema
+		s.providers = append(s.providers, backup)
 	}
 	s.ready.Store(true)
 	return s
+}
+
+// breaker makes a provider's breaker, reporting its state as a metric.
+func (s *Server) breaker(provider string) *breaker.Breaker {
+	gauge := s.metrics.Breaker.WithLabelValues(provider)
+	gauge.Set(float64(breaker.Closed))
+	return breaker.New(s.cfg.BreakerFailures, s.cfg.BreakerCooldown, func(state breaker.State) {
+		gauge.Set(float64(state))
+		s.log.Warn("circuit breaker", "provider", provider, "state", state.String())
+	})
 }
 
 // SetReady marks the server ready or not; /readyz reports it, so the load
