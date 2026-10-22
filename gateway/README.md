@@ -21,6 +21,35 @@ Streams are relayed event by event and flushed at once. The gateway always asks
 the provider for the usage chunk (`stream_options.include_usage`), counts its
 tokens, and drops it again unless the caller asked for it.
 
+## Limits and budgets
+
+Before a call goes to a provider, one Lua script on the shared Redis
+(`GATEWAY_LIMITS_REDIS_URL`) checks, atomically, and takes from:
+- the consumer's **token bucket** (`user:` consumers only; ingest and the
+  benchmarks are jobs, paced by the global bucket alone);
+- the **global bucket**, all consumers together;
+- the consumer's **daily budget** (UTC days), which the call reserves an estimate
+  from: its prompt at about four characters a token, plus `max_tokens` or
+  `GATEWAY_COMPLETION_ESTIMATE`. Once the provider reports usage, a second script
+  corrects the reservation to the actual cost; a failed call is refunded, and a
+  stream cut off before its usage chunk keeps the estimate.
+
+Every script reads the time from Redis (`TIME`), never a replica's clock. A
+refusal is `429` with `Retry-After` and `x-should-retry: false`, `error.code`
+`rate_limited` or `budget_exhausted`; the app answers its user with its own usual
+429 and refunds the question.
+
+Budgets count **weighted tokens**: one unit is the price of a gpt-4o-mini input
+token, so its output tokens count 4, cached input 0.5, an embedding token 0.13
+(`internal/pricing`; `GATEWAY_PRICES` adds or overrides models, and an unknown
+model is charged as gpt-4o). The default, 320,000 a day, is about 20 questions
+at the ~16,000 input tokens a question was measured to use.
+
+The limits' Redis runs with `noeviction`. If it can't be reached, each replica
+falls back to limits of its own at a third of the configured ones
+(`GATEWAY_REPLICAS`), sets `gateway_limiter_degraded` to 1, logs it once, and
+goes back to Redis as soon as it answers a ping.
+
 ## Configuration
 
 | Variable | Default | |
@@ -33,12 +62,21 @@ tokens, and drops it again unless the caller asked for it.
 | `GATEWAY_STREAM_TTFB_TIMEOUT` | `30s` | time to a stream's first byte; the rest may take as long as it takes |
 | `GATEWAY_EMBEDDINGS_TIMEOUT` | `60s` | |
 | `GATEWAY_MAX_BODY_BYTES` | `16777216` | |
+| `GATEWAY_LIMITS_REDIS_URL` | (unset: limits per process) | `redis://llm-gateway-limits:6379/0` in compose |
+| `GATEWAY_RATE_PER_CONSUMER`, `GATEWAY_BURST_PER_CONSUMER` | `60` a minute, `20` | per `user:` consumer; `0` turns it off |
+| `GATEWAY_RATE_GLOBAL`, `GATEWAY_BURST_GLOBAL` | `300` a minute, `60` | all consumers together |
+| `GATEWAY_DAILY_BUDGET_USER` | `320000` | weighted tokens per UTC day, per user; `0` turns it off |
+| `GATEWAY_DAILY_BUDGET_SYSTEM` | `0` (none) | per `system:` consumer |
+| `GATEWAY_COMPLETION_ESTIMATE` | `512` | answer tokens reserved for a call without `max_tokens` |
+| `GATEWAY_PRICES` | | JSON, e.g. `{"gpt-5-nano": {"input": 0.05, "cached": 0.005, "output": 0.4}}` (USD per million) |
+| `GATEWAY_REPLICAS` | `3` | how many replicas share the limits; the fallback divides by it |
 
 ## Development
 
 ```bash
 cd gateway
 go vet ./... && go test -race ./...
+GATEWAY_TEST_REDIS_URL=redis://localhost:6379/0 go test -run RealRedis ./internal/limits/   # against a real Redis
 go run ./cmd/fakeupstream -addr 127.0.0.1:9100     # a fake OpenAI, free and offline
 OPENAI_BASE_URL=http://127.0.0.1:9100/v1 OPENAI_API_KEY=sk-fake \
   LLM_GATEWAY_KEY=local-key-0123456789 go run ./cmd/gateway

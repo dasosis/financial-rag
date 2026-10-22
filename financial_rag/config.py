@@ -165,8 +165,9 @@ class BudgetExhausted(GatewayLimit):
 
 class RateLimited(GatewayLimit):
     def describe(self) -> str:
+        seconds = self.retry_after
         return (f"The app is handling too many questions right now. Try again in "
-                f"{self.retry_after} seconds.")
+                f"{seconds} second{'s' if seconds != 1 else ''}.")
 
 
 class ProvidersUnavailable(GatewayRefusal):

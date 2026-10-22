@@ -10,23 +10,9 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/dasosis/financial-rag/gateway/internal/usage"
 )
-
-// Usage is the token count a provider reports for one call.
-type Usage struct {
-	PromptTokens        int `json:"prompt_tokens"`
-	CompletionTokens    int `json:"completion_tokens"`
-	PromptTokensDetails *struct {
-		CachedTokens int `json:"cached_tokens"`
-	} `json:"prompt_tokens_details,omitempty"`
-}
-
-func (u Usage) cached() int {
-	if u.PromptTokensDetails == nil {
-		return 0
-	}
-	return u.PromptTokensDetails.CachedTokens
-}
 
 // chatRequest is a chat completions body, decoded only as far as the gateway
 // needs. Every other field is passed through as the caller sent it.
@@ -88,31 +74,51 @@ func (s *Server) chat(c *call) {
 			"The body must be a JSON chat completions request with a model.")
 		return
 	}
+	reservation, ok := s.admit(c, req.model, req.estimate(s.cfg.CompletionEstimate))
+	if !ok {
+		return
+	}
 	firstByte := s.cfg.ChatTimeout
 	if req.stream {
 		firstByte = s.cfg.StreamTTFBTimeout
 	}
 	resp, err := s.forward(c, "/chat/completions", req.encode(), firstByte)
 	if err != nil {
+		s.settle(c, reservation, 0) // nothing was generated
 		return
 	}
 	defer resp.Close()
 	if resp.StatusCode != http.StatusOK {
 		s.relayError(c, resp)
+		s.settle(c, reservation, 0)
 		return
 	}
 	if req.stream {
 		result := s.relayStream(c, resp, req.clientUsage)
-		s.countTokens(req.model, result.usage)
+		s.settle(c, reservation, s.account(req.model, result.usage))
 		s.log.Info("answered", "request_id", c.requestID, "endpoint", c.endpoint, "stream", true,
 			"model", req.model, "finished", result.finish, "complete", result.complete(),
 			"ms", time.Since(c.start).Milliseconds())
 		return
 	}
-	usage := s.relayJSON(c, resp)
-	s.countTokens(req.model, usage)
+	used := s.relayJSON(c, resp)
+	s.settle(c, reservation, s.account(req.model, used))
 	s.log.Info("answered", "request_id", c.requestID, "endpoint", c.endpoint, "stream", false,
 		"model", req.model, "ms", time.Since(c.start).Milliseconds())
+}
+
+// estimate is the call's likely usage before it is made: its prompt at about
+// four characters a token, and the answer at max_tokens if set, or `answer`.
+func (r *chatRequest) estimate(answer int) usage.Usage {
+	prompt := (len(r.fields["messages"]) + len(r.fields["tools"]) + len(r.fields["response_format"])) / 4
+	for _, name := range []string{"max_completion_tokens", "max_tokens"} {
+		var n int
+		if raw, ok := r.fields[name]; ok && json.Unmarshal(raw, &n) == nil && n > 0 {
+			answer = n
+			break
+		}
+	}
+	return usage.Usage{PromptTokens: prompt + 1, CompletionTokens: answer}
 }
 
 // readBody reads the request body, refusing one over the size limit.
@@ -180,21 +186,21 @@ func (s *Server) relayError(c *call, resp *upstreamResponse) {
 }
 
 // relayJSON passes a provider's JSON answer on and returns the usage in it.
-func (s *Server) relayJSON(c *call, resp *upstreamResponse) Usage {
+func (s *Server) relayJSON(c *call, resp *upstreamResponse) usage.Usage {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
 		s.upstreamFailed(c, err)
-		return Usage{}
+		return usage.Usage{}
 	}
 	var parsed struct {
-		Usage *Usage `json:"usage"`
+		Usage *usage.Usage `json:"usage"`
 	}
 	_ = json.Unmarshal(body, &parsed)
 	copyHeaders(c.w.Header(), resp.Header, "Content-Type", "x-request-id")
 	c.w.WriteHeader(http.StatusOK)
 	_, _ = c.w.Write(body)
 	if parsed.Usage == nil {
-		return Usage{}
+		return usage.Usage{}
 	}
 	return *parsed.Usage
 }
@@ -207,21 +213,9 @@ func copyHeaders(dst, src http.Header, names ...string) {
 	}
 }
 
-func (s *Server) countTokens(model string, u Usage) {
-	if u.PromptTokens > 0 {
-		s.metrics.Tokens.WithLabelValues(model, "prompt").Add(float64(u.PromptTokens))
-	}
-	if u.CompletionTokens > 0 {
-		s.metrics.Tokens.WithLabelValues(model, "completion").Add(float64(u.CompletionTokens))
-	}
-	if n := u.cached(); n > 0 {
-		s.metrics.Tokens.WithLabelValues(model, "cached").Add(float64(n))
-	}
-}
-
 // streamResult is what a relayed stream turned out to be.
 type streamResult struct {
-	usage  Usage
+	usage  usage.Usage
 	finish string // the last finish_reason seen: "stop", "length", "tool_calls"…
 	done   bool   // "data: [DONE]" arrived
 	err    error  // reading the provider or writing to the caller failed
@@ -314,7 +308,7 @@ func inspectChunk(data []byte, result *streamResult, clientUsage bool) bool {
 		Choices []struct {
 			FinishReason *string `json:"finish_reason"`
 		} `json:"choices"`
-		Usage *Usage `json:"usage"`
+		Usage *usage.Usage `json:"usage"`
 	}
 	if json.Unmarshal(data, &chunk) != nil {
 		return true

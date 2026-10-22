@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -49,24 +50,35 @@ def _wait(url: str, timeout: float = 20) -> None:
 
 
 @pytest.fixture(scope="module")
-def gateway(tmp_path_factory):
+def binaries(tmp_path_factory):
     go = os.getenv("GO") or shutil.which("go")
     if not go:
         pytest.skip("Go isn't installed (set GO to its path)")
     out = tmp_path_factory.mktemp("bin")
     exe = ".exe" if sys.platform == "win32" else ""
-    binaries = {}
+    built = {}
     for name in ("gateway", "fakeupstream"):
-        binaries[name] = out / (name + exe)
-        subprocess.run([go, "build", "-o", str(binaries[name]), f"./cmd/{name}"],
+        built[name] = out / (name + exe)
+        subprocess.run([go, "build", "-o", str(built[name]), f"./cmd/{name}"],
                        cwd=GATEWAY_DIR, check=True)
-
-    fake_port, port, metrics_port = _free_port(), _free_port(), _free_port()
-    fake = subprocess.Popen([str(binaries["fakeupstream"]), "-addr", f"127.0.0.1:{fake_port}"],
+    fake_port = _free_port()
+    fake = subprocess.Popen([str(built["fakeupstream"]), "-addr", f"127.0.0.1:{fake_port}"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    built["upstream"] = f"http://127.0.0.1:{fake_port}/v1"
+    yield built
+    fake.terminate()
+    fake.wait(timeout=10)
+
+
+@contextmanager
+def _running_gateway(binaries, **settings):
+    """A gateway on loopback ports in front of the fake upstream. No Redis: its
+    limits are its own (GATEWAY_LIMITS_REDIS_URL unset)."""
+    port, metrics_port = _free_port(), _free_port()
     env = {**os.environ, "LLM_GATEWAY_KEY": KEY, "OPENAI_API_KEY": "sk-fake-upstream",
-           "OPENAI_BASE_URL": f"http://127.0.0.1:{fake_port}/v1",
-           "GATEWAY_ADDR": f"127.0.0.1:{port}", "GATEWAY_METRICS_ADDR": f"127.0.0.1:{metrics_port}"}
+           "OPENAI_BASE_URL": binaries["upstream"],
+           "GATEWAY_ADDR": f"127.0.0.1:{port}", "GATEWAY_METRICS_ADDR": f"127.0.0.1:{metrics_port}",
+           **settings}
     server = subprocess.Popen([str(binaries["gateway"])], env=env,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -75,9 +87,13 @@ def gateway(tmp_path_factory):
                "metrics": f"http://127.0.0.1:{metrics_port}/metrics"}
     finally:
         server.terminate()
-        fake.terminate()
         server.wait(timeout=10)
-        fake.wait(timeout=10)
+
+
+@pytest.fixture(scope="module")
+def gateway(binaries):
+    with _running_gateway(binaries) as running:
+        yield running
 
 
 @pytest.fixture(autouse=True)
@@ -128,6 +144,40 @@ def test_embeddings():
     assert [len(v) for v in vectors] == [1536, 1536]
     assert vectors[0] != vectors[1]
     assert config.embeddings().embed_query("Net income") == vectors[1]
+
+
+def _use(gateway, monkeypatch):
+    monkeypatch.setenv("LLM_GATEWAY_URL", gateway["url"])
+    config._gateway_client.cache_clear()
+
+
+def test_a_spent_budget_reaches_the_app_as_budget_exhausted(binaries, monkeypatch):
+    with _running_gateway(binaries, GATEWAY_DAILY_BUDGET_USER="1500",
+                          GATEWAY_COMPLETION_ESTIMATE="1", GATEWAY_RATE_PER_CONSUMER="0",
+                          GATEWAY_RATE_GLOBAL="0") as limited:
+        _use(limited, monkeypatch)
+        llm = config.chat_model(temperature=0)
+        with config.as_consumer("user:alice"):
+            llm.invoke("What was revenue?")       # charged its real usage, ~60 units
+            with pytest.raises(config.BudgetExhausted) as caught:
+                for _ in range(100):
+                    llm.invoke("What was revenue?")
+        assert 0 < caught.value.retry_after <= 86_400
+        # Another consumer still has its own budget
+        with config.as_consumer("user:bob"):
+            assert llm.invoke("hi").content.startswith("Fake answer")
+
+
+def test_a_rate_limit_reaches_the_app_as_rate_limited(binaries, monkeypatch):
+    with _running_gateway(binaries, GATEWAY_RATE_PER_CONSUMER="1",
+                          GATEWAY_BURST_PER_CONSUMER="2") as limited:
+        _use(limited, monkeypatch)
+        llm = config.chat_model(temperature=0, max_retries=2)
+        with config.as_consumer("user:alice"), pytest.raises(config.RateLimited) as caught:
+            for _ in range(3):
+                llm.invoke("hi")
+        assert 50 <= caught.value.retry_after <= 60
+        assert "gateway_limit_rejections_total{reason=\"consumer_rate\"} 1" in _metrics(limited)
 
 
 def test_a_wrong_key_is_refused(monkeypatch):

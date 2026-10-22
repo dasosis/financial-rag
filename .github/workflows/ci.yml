@@ -54,6 +54,14 @@ jobs:
     defaults:
       run:
         working-directory: gateway
+    # A real Redis for the limiter's integration test (the rest use miniredis)
+    services:
+      redis:
+        image: redis:7.4.1-alpine
+        ports:
+          - 6379:6379
+    env:
+      GATEWAY_TEST_REDIS_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@v5
 

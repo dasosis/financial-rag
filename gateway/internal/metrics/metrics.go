@@ -9,6 +9,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/dasosis/financial-rag/gateway/internal/limits"
 )
 
 // Latency buckets in seconds, up to two minutes: figure extraction calls run long.
@@ -25,6 +27,10 @@ type Metrics struct {
 	Tokens    *prometheus.CounterVec // model, kind (prompt, completion, cached)
 	Upstream  *prometheus.CounterVec // provider, endpoint, code: calls to providers
 	UpLatency *prometheus.HistogramVec
+
+	Cost            *prometheus.CounterVec // model: dollars at list price
+	LimiterDegraded prometheus.Gauge
+	Rejections      *prometheus.CounterVec // reason: consumer_rate, global_rate, budget
 }
 
 // New registers the gateway's metrics, plus Go runtime and process metrics.
@@ -62,14 +68,41 @@ func New() *Metrics {
 			Help:    "Time providers took to start answering (headers received), by provider and endpoint.",
 			Buckets: latencyBuckets,
 		}, []string{"provider", "endpoint"}),
+		Cost: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_cost_usd_total",
+			Help: "What the calls cost at list price (the price table), by model.",
+		}, []string{"model"}),
+		LimiterDegraded: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "gateway_limiter_degraded",
+			Help: "1 while this replica can't reach the limits' Redis and keeps limits of its own.",
+		}),
+		Rejections: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "gateway_limit_rejections_total",
+			Help: "Calls refused by a limit: consumer_rate, global_rate or budget.",
+		}, []string{"reason"}),
 	}
 	m.Registry.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.Requests, m.Latency, m.TTFB, m.InFlight, m.Tokens, m.Upstream, m.UpLatency,
+		m.Cost, m.LimiterDegraded, m.Rejections,
 	)
+	for _, reason := range []limits.Reason{limits.ConsumerRate, limits.GlobalRate, limits.Budget} {
+		m.Rejections.WithLabelValues(string(reason)) // show 0 before the first
+	}
 	return m
 }
+
+// SetDegraded and Rejected report for the limiter (limits.Metrics).
+func (m *Metrics) SetDegraded(on bool) {
+	if on {
+		m.LimiterDegraded.Set(1)
+	} else {
+		m.LimiterDegraded.Set(0)
+	}
+}
+
+func (m *Metrics) Rejected(r limits.Reason) { m.Rejections.WithLabelValues(string(r)).Inc() }
 
 // Handler serves /metrics.
 func (m *Metrics) Handler() http.Handler {

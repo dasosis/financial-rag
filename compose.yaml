@@ -95,6 +95,19 @@ services:
     mem_limit: 40m
     restart: unless-stopped
 
+  # The replicas' shared rate limits and daily budgets. noeviction: a limit
+  # Redis dropped to make room would let calls through. The append-only file
+  # keeps today's budgets across a restart.
+  llm-gateway-limits:
+    profiles: ["gateway"]
+    image: redis:7.4.1-alpine
+    command: ["redis-server", "--maxmemory", "16mb", "--maxmemory-policy", "noeviction",
+              "--appendonly", "yes", "--save", ""]
+    volumes:
+      - gateway-limits:/data
+    mem_limit: 32m
+    restart: unless-stopped
+
   llm-gateway-1: &llm-gateway
     profiles: ["gateway"]
     build: ./gateway
@@ -104,7 +117,10 @@ services:
         required: false                # the gateway refuses to start without its keys
     environment:
       LLM_GATEWAY_KEY: ${LLM_GATEWAY_KEY:-}
+      GATEWAY_LIMITS_REDIS_URL: redis://llm-gateway-limits:6379/0
+      GATEWAY_REPLICAS: "3"            # without Redis, each keeps a third of the limits
       GOMEMLIMIT: 30MiB                # collect garbage before mem_limit is near
+    depends_on: [llm-gateway-limits]
     healthcheck:
       test: ["CMD", "/gateway", "-healthcheck"]
       interval: 10s
@@ -131,3 +147,4 @@ services:
 volumes:
   chroma-data:
   caddy-data:
+  gateway-limits:                      # the gateway profile's rate limits and budgets
