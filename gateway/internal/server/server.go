@@ -32,6 +32,7 @@ import (
 	"github.com/dasosis/financial-rag/gateway/internal/limits"
 	"github.com/dasosis/financial-rag/gateway/internal/metrics"
 	"github.com/dasosis/financial-rag/gateway/internal/pricing"
+	"github.com/dasosis/financial-rag/gateway/internal/redact"
 )
 
 // Error codes the app maps to its own exceptions (financial_rag/config.py).
@@ -53,6 +54,7 @@ type Server struct {
 	providers []*Provider
 	limiter   *limits.Limiter
 	cache     *cache.Cache
+	redactor  *redact.Redactor // nil: redaction off
 	prices    *pricing.Table
 	ready     atomic.Bool
 	unpriced  sync.Map // models already warned about
@@ -66,7 +68,9 @@ type Deps struct {
 	Log     *slog.Logger
 	Limiter *limits.Limiter // nil: no limits or budgets
 	Cache   *cache.Cache    // nil: no response cache
-	Prices  *pricing.Table  // nil: the built-in price table
+	// The personal data to redact from prompts (package redact); nil: none
+	Redactor *redact.Redactor
+	Prices   *pricing.Table // nil: the built-in price table
 }
 
 // New builds a server that sends calls to OpenAI, and to OpenRouter when
@@ -77,6 +81,7 @@ func New(cfg config.Config, d Deps) *Server {
 	}
 	s := &Server{
 		cfg: cfg, metrics: d.Metrics, log: d.Log, limiter: d.Limiter, cache: d.Cache, prices: d.Prices,
+		redactor: d.Redactor,
 	}
 	s.providers = []*Provider{NewProvider("openai", cfg.OpenAIBaseURL, cfg.OpenAIKey, nil, s.breaker("openai"))}
 	if cfg.OpenRouterKey != "" {

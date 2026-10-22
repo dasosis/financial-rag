@@ -26,6 +26,7 @@ import (
 	"github.com/dasosis/financial-rag/gateway/internal/limits"
 	"github.com/dasosis/financial-rag/gateway/internal/metrics"
 	"github.com/dasosis/financial-rag/gateway/internal/pricing"
+	"github.com/dasosis/financial-rag/gateway/internal/redact"
 	"github.com/dasosis/financial-rag/gateway/internal/server"
 )
 
@@ -86,7 +87,12 @@ func run(cfg config.Config, log *slog.Logger) error {
 		defer func() { _ = crdb.Close() }()
 		responses = cache.New(crdb, cfg.CacheTTL)
 	}
-	srv := server.New(cfg, server.Deps{Metrics: m, Log: log, Limiter: limiter, Cache: responses, Prices: prices})
+	var redactor *redact.Redactor
+	if len(cfg.Redact) > 0 {
+		redactor = redact.New(cfg.Redact...)
+	}
+	srv := server.New(cfg, server.Deps{Metrics: m, Log: log, Limiter: limiter, Cache: responses,
+		Redactor: redactor, Prices: prices})
 
 	api := &http.Server{
 		Addr:              cfg.Addr,
@@ -104,7 +110,7 @@ func run(cfg config.Config, log *slog.Logger) error {
 	go func() { errs <- serve(api) }()
 	go func() { errs <- serve(internal) }()
 	log.Info("listening", "addr", cfg.Addr, "metrics", cfg.MetricsAddr, "openai", cfg.OpenAIBaseURL,
-		"limits_redis", cfg.LimitsRedisURL != "", "cache", responses != nil)
+		"limits_redis", cfg.LimitsRedisURL != "", "cache", responses != nil, "redact", cfg.Redact)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
