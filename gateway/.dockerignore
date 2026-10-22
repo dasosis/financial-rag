@@ -1,0 +1,6 @@
+Dockerfile
+.dockerignore
+Caddyfile
+*.md
+*_test.go
+loadtest
