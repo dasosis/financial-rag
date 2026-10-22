@@ -24,7 +24,6 @@ import json
 from pathlib import Path
 
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from financial_rag import config, rag
 
@@ -244,8 +243,9 @@ def main():
             before_data = json.load(f)
         print(f"Loaded before-scores from {RESULTS_PATH}")
 
-    llm = LangchainLLMWrapper(ChatOpenAI(model=config.CHAT_MODEL, temperature=0))
-    embeddings = LangchainEmbeddingsWrapper(OpenAIEmbeddings(model=config.EMBEDDING_MODEL))
+    config.run_as("system:eval", cache=False)
+    llm = LangchainLLMWrapper(config.chat_model(temperature=0))
+    embeddings = LangchainEmbeddingsWrapper(config.embeddings())
 
     print("\nBuilding evaluation dataset …")
     dataset = build_eval_dataset(EVAL_QUESTIONS)

@@ -344,6 +344,7 @@ def passed(row: dict) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     args = benchmark_args(__doc__.split("\n\n")[0].strip(), argv)
+    config.run_as("system:eval", cache=False)
     print(f"Model: {config.CHAT_MODEL}\n")
     spans = tracing.collect()
     budget = Budget(args.max_cost)

@@ -45,6 +45,7 @@ from pypdf.errors import PdfReadError
 from financial_rag import (
     analysis,
     auth,
+    config,
     edgar,
     financials,
     ingest,
@@ -244,19 +245,34 @@ def _answer(request: QueryRequest, owner: str, event: int | None) -> router.Answ
     """router.answer for one counted request, failures as HTTP errors; refunds the
     question if it couldn't be answered."""
     try:
-        return router.answer(
-            request.question, owner, request.source_file,
-            history=[(turn.role, turn.content) for turn in request.history],
-        )
+        # Set here, in the thread doing the work: /query/stream runs this on a
+        # thread of its own, and threads don't inherit context variables.
+        with config.as_consumer(config.user_consumer(owner)):
+            return router.answer(
+                request.question, owner, request.source_file,
+                history=[(turn.role, turn.content) for turn in request.history],
+            )
     except router.UnknownFiling as exc:
         usage.refund(event)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (config.GatewayLimit, config.ProvidersUnavailable) as exc:
+        usage.refund(event)
+        raise _gateway_refusal(exc) from exc
     except RuntimeError as exc:
         usage.refund(event)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         usage.refund(event)
         raise HTTPException(status_code=500, detail=f"Inference error: {exc}") from exc
+
+
+def _gateway_refusal(exc: Exception) -> HTTPException:
+    """The LLM gateway's budget or rate limit as the usage limits' own 429 (same
+    detail and Retry-After), or its outage as a 503."""
+    if isinstance(exc, config.GatewayLimit):
+        return HTTPException(status_code=429, detail=str(exc),
+                             headers={"Retry-After": str(exc.retry_after)})
+    return HTTPException(status_code=503, detail=str(exc))
 
 
 @app.post("/query", response_model=QueryResponse)
@@ -415,12 +431,15 @@ def upload_document(file: UploadFile, owner: str = Depends(current_owner)):
         staged = Path(staging) / name
         staged.write_bytes(data)
         try:
-            with _ingest_lock:
+            with _ingest_lock, config.as_consumer(config.user_consumer(owner)):
                 chunks = ingest.ingest_file(staged, owner, max_pages=MAX_UPLOAD_PAGES)
                 staged.replace(user_dir / name)
         except (ValueError, PdfReadError) as exc:
             usage.refund(event)
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (config.GatewayLimit, config.ProvidersUnavailable) as exc:
+            usage.refund(event)
+            raise _gateway_refusal(exc) from exc
         except Exception as exc:
             usage.refund(event)
             raise HTTPException(status_code=500, detail=f"Ingestion error: {exc}") from exc

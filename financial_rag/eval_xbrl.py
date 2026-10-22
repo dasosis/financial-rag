@@ -51,7 +51,17 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain_core.callbacks import get_usage_metadata_callback
 
-from financial_rag import analysis, edgar, eval_answers, financials, ingest, rag, router, xbrl
+from financial_rag import (
+    analysis,
+    config,
+    edgar,
+    eval_answers,
+    financials,
+    ingest,
+    rag,
+    router,
+    xbrl,
+)
 
 load_dotenv()
 
@@ -222,6 +232,7 @@ def _options(parser: argparse.ArgumentParser) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = eval_answers.benchmark_args(__doc__.split("\n\n")[0].strip(), argv, _options)
+    config.run_as("system:eval", cache=False)
     use_store(STORE)
     budget = eval_answers.Budget(args.max_cost)
 

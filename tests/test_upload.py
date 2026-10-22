@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from langchain_core.documents import Document
 from langchain_core.embeddings import DeterministicFakeEmbedding
 
-from financial_rag import api, financials, ingest, rag
+from financial_rag import api, config, financials, ingest, rag
 from financial_rag.financials import Fact
 
 PDF_BYTES = b"%PDF-1.7\n fake body"
@@ -190,9 +190,7 @@ def test_list_documents_shows_own_files_and_shared_samples(client, store, tmp_pa
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     monkeypatch.setattr(ingest, "CHROMA_DIR", tmp_path / "chroma_db")
-    monkeypatch.setattr(
-        ingest, "OpenAIEmbeddings", lambda model: DeterministicFakeEmbedding(size=32)
-    )
+    monkeypatch.setattr(config, "embeddings", lambda: DeterministicFakeEmbedding(size=32))
 
 
 def _fake_pdf(monkeypatch, pages):
@@ -452,6 +450,27 @@ def test_a_failed_llm_call_falls_back_to_the_cross_encoder(three_chunks, monkeyp
     assert all("llm_rank" not in d.metadata["retrieval"] for d in found)
 
 
+@pytest.mark.filterwarnings("ignore:Relevance scores must be between 0 and 1")
+def test_a_gateway_limit_in_the_llm_reranker_is_not_swallowed(three_chunks, monkeypatch):
+    from tests.test_gateway_client import exception
+
+    monkeypatch.setattr(rag, "RERANKER", "llm")
+
+    def limited(question, docs):
+        raise exception(config.BudgetExhausted)
+
+    monkeypatch.setattr(rag, "llm_rank", limited)
+    with pytest.raises(config.BudgetExhausted):
+        rag.retrieve_and_rerank("revenue", three_chunks, ALICE)
+
+    def down(question, docs):
+        raise exception(config.ProvidersUnavailable)
+
+    monkeypatch.setattr(rag, "llm_rank", down)
+    found = rag.retrieve_and_rerank("revenue", three_chunks, ALICE)
+    assert {d.metadata["retrieval"]["reranker"] for d in found} == {"cross-encoder"}
+
+
 def test_llm_rank_keeps_valid_unique_positions(monkeypatch):
     prompts = []
 
@@ -466,7 +485,7 @@ def test_llm_rank_keeps_valid_unique_positions(monkeypatch):
             prompts.append(prompt)
             return rag._PassageRanking(ranking=[3, 3, 9, 1, 0])
 
-    monkeypatch.setattr(rag, "ChatOpenAI", FakeChat)
+    monkeypatch.setattr(config, "chat_model", FakeChat)
     docs = [Document(page_content=f"text {i}", metadata={"source_file": "a.pdf", "page": i})
             for i in range(3)]
     assert rag.llm_rank("q?", docs) == [2, 0]

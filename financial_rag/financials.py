@@ -554,12 +554,10 @@ def _map_rows(pages: dict[int, str], only: list[str] | None = None) -> list[RowM
 
     Its values are only hints, checked by verify_row.
     """
-    from langchain_openai import ChatOpenAI
-
     items = "\n".join(f"- {item.key}: {item.hint}" for item in LINE_ITEMS.values()
                       if only is None or item.key in only)
     text = "\n\n".join(f"=== Page {n} ===\n{t}" for n, t in pages.items())
-    llm = ChatOpenAI(model=config.CHAT_MODEL, temperature=0).with_structured_output(RowMappings)
+    llm = config.chat_model(temperature=0).with_structured_output(RowMappings)
     result = llm.invoke(
         [("system", _MAPPING_PROMPT.format(items=items)), ("human", text)]
     )
@@ -797,13 +795,11 @@ headcount, unearned revenue, ...).
 
 def _map_parts(pages: dict[int, str]) -> list[PartMapping]:
     """Ask the model which rows are the parts of each breakdown. Values are only hints."""
-    from langchain_openai import ChatOpenAI
-
     breakdowns = "\n".join(
         f"- {b.key}: {ITEM_NAMES[b.total].lower()} by {b.dimension}" for b in BREAKDOWNS.values()
     )
     text = "\n\n".join(f"=== Page {n} ===\n{t}" for n, t in pages.items())
-    llm = ChatOpenAI(model=config.CHAT_MODEL, temperature=0).with_structured_output(PartMappings)
+    llm = config.chat_model(temperature=0).with_structured_output(PartMappings)
     return llm.invoke(
         [("system", _BREAKDOWN_PROMPT.format(breakdowns=breakdowns)), ("human", text)]
     ).rows

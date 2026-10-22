@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 import sys
 
-from financial_rag import rag
+from financial_rag import config, rag
 from financial_rag.evaluate import EVAL_QUESTIONS
 from financial_rag.ingest import PUBLIC_OWNER
 
@@ -140,6 +140,7 @@ def _summary(ranks: list[int | None]) -> str:
 
 
 def main() -> None:
+    config.run_as("system:eval", cache=False)
     configurations = dict(CONFIGURATIONS)
     if "--no-llm" in sys.argv:
         configurations.pop("hybrid + LLM rerank")
