@@ -4,3 +4,4 @@ Caddyfile
 *.md
 *_test.go
 loadtest
+**/testdata
