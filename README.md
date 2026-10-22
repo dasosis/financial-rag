@@ -104,6 +104,7 @@ relative paths.
 | `evaluate.py` | Optional RAGAs evaluation (faithfulness, answer relevancy) with a before/after comparison table. |
 | `config.py` | The models used: `CHAT_MODEL` for every language-model call, the embedding model and the reranker. |
 | `start.py` | One-command boot: checks config, ingests if needed, starts both servers, opens the browser. |
+| `gateway/` | Optional LLM gateway in Go between the API and the providers: limits, budgets, cache, fallback, redaction, metrics (see [LLM gateway](#llm-gateway)). |
 
 ---
 
@@ -584,6 +585,161 @@ Details worth knowing:
   Docker.
 - Containers run as a non-root user, and the API exposes a `/health` healthcheck that
   gates UI startup.
+
+---
+
+## LLM gateway
+
+`gateway/` is an optional service in Go between the API and the model providers. It
+speaks the OpenAI API, so the app only changes where it sends its calls: set
+`LLM_GATEWAY_URL` and every chat and embeddings call goes to the gateway instead of
+OpenAI. Without it the app calls OpenAI directly, exactly as before.
+
+```
+   api.py ──► llm-gateway (Caddy, round robin) ─┬─► llm-gateway-1 ─┐   ┌─► OpenAI
+                                                ├─► llm-gateway-2 ─┼───┤
+                                                └─► llm-gateway-3 ─┘   └─► OpenRouter (backup)
+                                                       │    │
+                                    limits & budgets (Redis)  response cache (Redis)
+```
+
+Each call is checked and recorded in this order:
+- **Who's calling.** The gateway's own key (`LLM_GATEWAY_KEY`) and an `X-Consumer-Id`,
+  either `user:<id>` or `system:ingest` / `system:eval`. Without both it answers `401`.
+  The OpenAI key then lives only in the gateway.
+- **Personal data is redacted** before anything else sees the prompt: emails,
+  formatted phone numbers, card numbers (Luhn-checked), dashed SSNs, PAN and Aadhaar
+  (Verhoeff-checked) become `[EMAIL]`, `[PHONE]` and so on. A test runs the redactor
+  over both sample 10-Ks and every benchmark question and fails on any changed
+  figure, year, EPS value, share count or citation. Only counts are recorded.
+- **Exact repeats come from a cache**: temperature-0 calls, keyed by a hash of every
+  field that can change the answer, never by similarity. "Revenue in 2023" and "in
+  2024" embed almost identically, and a semantic cache would answer one with the
+  other's figures. Only answers that finished normally are stored, for 7 days, and
+  the benchmarks bypass the cache (`Cache-Control: no-cache`).
+- **Rate limits and daily budgets** are shared by the replicas through Redis, checked
+  and taken in one Lua script that reads Redis's clock:
+  - 60 calls a minute per user and 300 for everyone;
+  - 320,000 weighted tokens a day per user, about 20 questions at the ~16,000 tokens
+    one uses. A gpt-4o-mini input token counts 1, an output token 4.
+
+  Each call reserves an estimate and is corrected to its real usage afterwards. Over
+  a limit, the app answers its user with the usual `429` (detail and `Retry-After`)
+  and refunds the question. If that Redis is down, each replica keeps a third of
+  the limits itself and says so in a metric.
+- **Fallback.** OpenAI first, then OpenRouter's `openai/gpt-4o-mini`, with a circuit
+  breaker per provider. Nothing switches once the first byte has gone back to the
+  app. Embeddings never fail over to a different model, because its vectors
+  couldn't be compared with the stored ones; with OpenAI down they get `503`. A
+  backup's structured output goes out only if it matches the schema. When no
+  provider can answer, the planner, reranker and follow-up rewrite fall back as
+  they do on any failed call, and the answer itself is a `503`.
+
+The details, and every setting, are in [gateway/README.md](gateway/README.md).
+
+### Running it
+
+```bash
+# .env (the API's):
+#   LLM_GATEWAY_URL=http://llm-gateway:8080/v1
+#   LLM_GATEWAY_KEY=<a long random string>
+# .env.gateway (read by the gateway only):
+#   OPENAI_API_KEY=sk-...
+#   OPENROUTER_API_KEY=sk-or-...        # optional: the backup
+docker compose --profile gateway up -d                       # 3 replicas, balancer, 2 Redis
+docker compose --profile gateway --profile metrics up -d     # and Prometheus + Grafana
+```
+
+`docker compose up` without a profile starts exactly what it did before. None of the
+gateway's services are published to the host. Grafana, like Jaeger, listens on the
+host's loopback only: `ssh -L 3000:localhost:3000 <host>`, then
+http://localhost:3000, user `admin`. It needs `GRAFANA_ADMIN_PASSWORD` in `.env` and
+won't start without one; Grafana keeps the password it was first started with.
+Anonymous access is off. Its one dashboard is provisioned from
+`gateway/observability`:
+- request rate and errors by code;
+- latency and time to first byte (p50 / p95 / p99);
+- cache hit ratio, cost and cost saved, and tokens by model;
+- which provider served each call, and each replica's breakers;
+- the limiter's state, limit and budget rejections, and redactions.
+
+No metric carries a user id.
+
+Every container has a `mem_limit`, sized for a 2 GB host:
+
+| Service | Limit | Used under load |
+| --- | --- | --- |
+| 3 gateway replicas | 3 × 40 MB | ~11 MB each |
+| Load balancer (Caddy) | 40 MB | ~20 MB |
+| Limits Redis (`noeviction`) | 32 MB | ~4 MB |
+| Cache Redis (`allkeys-lru`, 64 MB of entries) | 96 MB | ~15 MB |
+| Prometheus | 128 MB | ~25 MB |
+| Grafana | 160 MB | ~80 MB |
+| **Total** | **576 MB** | **~180 MB** |
+
+### Measured
+
+`eval_answers.py` through the gateway on the real models. The eval process had no
+OpenAI key, so every call went through the gateway:
+
+| | Correct | Route | Verified | Cited | Cost |
+| --- | --- | --- | --- | --- | --- |
+| Passthrough | **52/52** | **52/52** | **52/52** | **52/52** | $0.049 |
+| Everything on: redaction, limits, cache (bypassed), breakers | **51/52** | **52/52** | **52/52** | **52/52** | $0.048 |
+| Forced onto the backup (`X-Force-Provider: openrouter`) | not run yet: needs an `OPENROUTER_API_KEY` | | | | |
+| Direct to OpenAI (nightly, last five runs) | 51–52/52 | 51–52/52 | 52/52 | 51–52/52 | ~$0.05 |
+
+The one miss with everything on is the goodwill question taking a segment's goodwill
+(51,235) from the right table for the total (50,969), one of the text answers that
+vary between runs. Nothing on that page was redacted: the run redacted two phone
+numbers, both on cover pages.
+
+A load test (`gateway/loadtest`) against the fake upstream (`gateway/cmd/fakeupstream`,
+which answers after 20 ms) with 20 concurrent clients. It ran through the balancer
+and three replicas, with redaction, both Redis and the breakers on, under Docker
+Desktop on a laptop:
+
+| | p50 | p99 |
+| --- | --- | --- |
+| Straight to the fake | 21.5 ms | 24 ms |
+| Through the gateway | 25 ms | 38–53 ms |
+| **The gateway's overhead** | **+3–4 ms** | **+14–29 ms** |
+| Time to first token, streamed, through the gateway | 28–29 ms | 56–78 ms |
+| A cache hit | 8–9.5 ms | 29–36 ms |
+
+The global limit across the three replicas, at 600 calls a minute with a burst of
+60, with 50 clients calling as fast as they could:
+
+| Run | Most the limit allows (burst + rate × time) | Admitted |
+| --- | --- | --- |
+| 3 × 20 s | 260.1–260.2 | 259, 259, 259 (99.6%) |
+| 60 s | 660.2 | 659 (99.8%) |
+
+It never let more through than the limit allows. A real model takes seconds to
+answer, so the overhead is a few milliseconds in thousands.
+
+### Tests
+
+```bash
+cd gateway && go vet ./... && go test -race ./...     # CI's Go (gateway) job, with a real Redis
+RUN_GATEWAY_TESTS=1 pytest tests/test_gateway_live.py   # the app's real models through it
+```
+
+The Go tests run the gateway against an in-process fake upstream (SSE included) and
+miniredis. They cover:
+- the global limit across three replicas and concurrent clients, which is never
+  exceeded, plus one test on a real Redis;
+- budgets reserved and corrected, and the per-replica fallback;
+- cache keys, storage rules and the SSE replay;
+- breakers, failover before the first byte only, and embeddings refusing another model;
+- the backup's structured output checked against its schema;
+- the redactor over the samples.
+
+The Python tests need neither Go nor Redis. They play the gateway's responses with a
+mock transport: the model factory, consumer ids, and refusals arriving as the API's
+`429` and `503` with a refund. The opt-in live test builds the gateway and runs the
+app's real `ChatOpenAI` and `OpenAIEmbeddings` through it: invoke, stream,
+`with_structured_output`, embeddings, a spent budget, the cache and the backup.
 
 ---
 

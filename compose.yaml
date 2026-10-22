@@ -145,6 +145,51 @@ services:
   llm-gateway-2: *llm-gateway
   llm-gateway-3: *llm-gateway
 
+  # The gateway's metrics, excluded from `up` by their profile: Prometheus scrapes
+  # each replica, Grafana shows the dashboard provisioned from gateway/observability.
+  # Start with `docker compose --profile gateway --profile metrics up -d`, with
+  # GRAFANA_ADMIN_PASSWORD in .env (Grafana refuses to start without it). Like
+  # Jaeger, Grafana listens on the host's loopback only:
+  # `ssh -L 3000:localhost:3000 <host>`, then http://localhost:3000 (user admin).
+  prometheus:
+    profiles: ["metrics"]
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=200MB
+    environment:
+      GOMEMLIMIT: 90MiB
+    volumes:
+      - ./gateway/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    mem_limit: 128m
+    restart: unless-stopped
+
+  grafana:
+    profiles: ["metrics"]
+    image: grafana/grafana:12.1.0
+    entrypoint: ["sh", "-c", "[ -n \"$$GF_SECURITY_ADMIN_PASSWORD\" ] || { echo 'Set GRAFANA_ADMIN_PASSWORD in .env' >&2; exit 1; }; exec /run.sh"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./gateway/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./gateway/observability/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on: [prometheus]
+    mem_limit: 160m
+    restart: unless-stopped
+
   # One-shot job, excluded from `docker compose up` by its profile.
   # PDFs are bind-mounted read-only from ./data on the host.
   ingest:
@@ -160,3 +205,5 @@ volumes:
   chroma-data:
   caddy-data:
   gateway-limits:                      # the gateway profile's rate limits and budgets
+  prometheus-data:                     # the metrics profile's
+  grafana-data:
