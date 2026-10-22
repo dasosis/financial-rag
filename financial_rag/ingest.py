@@ -40,7 +40,6 @@ from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from financial_rag import config, financials, html_filing
@@ -191,7 +190,7 @@ def open_vectorstore() -> Chroma:
     """Open the persisted store, creating it on first write if it doesn't exist."""
     return Chroma(
         persist_directory=str(CHROMA_DIR),
-        embedding_function=OpenAIEmbeddings(model=config.EMBEDDING_MODEL),
+        embedding_function=config.embeddings(),
         collection_name=COLLECTION_NAME,
     )
 
@@ -401,6 +400,7 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--fetch-samples", action="store_true",
                         help="download the sample 10-Ks from SEC EDGAR first")
     args = parser.parse_args(argv)
+    config.run_as("system:ingest")
     if args.fetch_samples:
         fetch_samples()
     if not DATA_DIR.exists():

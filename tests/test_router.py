@@ -9,7 +9,7 @@ from decimal import Decimal
 import pytest
 from fastapi.testclient import TestClient
 
-from financial_rag import api, financials, ingest, rag, router
+from financial_rag import api, config, financials, ingest, rag, router
 from financial_rag.financials import LINE_ITEMS, Fact
 from financial_rag.ingest import PUBLIC_OWNER, Filing
 from financial_rag.router import QuestionPlan
@@ -137,6 +137,24 @@ def test_planner_failure_falls_back_to_text(text_calls):
         raise RuntimeError("model unavailable")
 
     assert router.answer("Operating margin?", "alice", planner=broken).route == "text"
+
+
+def test_a_gateway_limit_in_the_planner_is_not_swallowed(text_calls):
+    from tests.test_gateway_client import exception
+
+    _store(PUBLIC_OWNER, "msft.pdf", MSFT)
+
+    def limited(question):
+        raise exception(config.RateLimited)
+
+    with pytest.raises(config.RateLimited):
+        router.answer("Operating margin?", "alice", planner=limited)
+    assert text_calls == []
+
+    def down(question):
+        raise exception(config.ProvidersUnavailable)
+
+    assert router.answer("Operating margin?", "alice", planner=down).route == "text"
 
 
 def test_uncomputable_calculation_explains_then_answers_from_text(text_calls):

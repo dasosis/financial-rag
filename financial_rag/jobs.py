@@ -22,6 +22,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+from financial_rag import config
+
 JOBS_DB = Path("chroma_db") / "jobs.sqlite3"
 
 QUEUED, RUNNING, DONE, FAILED = "queued", "running", "done", "failed"
@@ -131,7 +133,10 @@ def submit(owner: str, kind: str, subject: str,
         _write("UPDATE jobs SET state = ?, updated = ? WHERE id = ?",
                (RUNNING, time.time(), job_id))
         try:
-            result = work(lambda step: set_step(job_id, step))
+            # The worker thread doesn't inherit the request's context: name the
+            # job's owner as the consumer of its model calls here
+            with config.as_consumer(config.user_consumer(owner)):
+                result = work(lambda step: set_step(job_id, step))
         except Exception as exc:
             _write("UPDATE jobs SET state = ?, error = ?, step = '', updated = ? WHERE id = ?",
                    (FAILED, str(exc) or exc.__class__.__name__, time.time(), job_id))

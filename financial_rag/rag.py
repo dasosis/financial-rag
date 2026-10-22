@@ -36,7 +36,6 @@ from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from pydantic import BaseModel, Field
 
 from financial_rag import config, hybrid, tracing
@@ -129,8 +128,8 @@ def llm_rank(question: str, docs: list) -> list[int]:
     it leaves out are missing; numbers out of range or repeated are dropped.
     """
     passages = "\n\n".join(f"[{n}] {doc_to_context(doc)}" for n, doc in enumerate(docs, 1))
-    llm = ChatOpenAI(
-        model=config.CHAT_MODEL, temperature=0, timeout=LLM_RERANK_TIMEOUT, max_retries=1
+    llm = config.chat_model(
+        temperature=0, timeout=LLM_RERANK_TIMEOUT, max_retries=1
     ).with_structured_output(_PassageRanking)
     result = llm.invoke(LLM_RERANK_PROMPT.format(question=question, passages=passages))
     order: list[int] = []
@@ -202,7 +201,7 @@ def _answer_with_docs(question: str, docs: list, problems: list[str] | None = No
     if problems:
         messages.append(("human", RETRY_PROMPT))
     prompt = ChatPromptTemplate.from_messages(messages)
-    llm = ChatOpenAI(model=config.CHAT_MODEL, temperature=0)
+    llm = config.chat_model(temperature=0)
     chain = (
         {
             "context": RunnableLambda(lambda _: context),
@@ -328,7 +327,7 @@ def _load_vectorstore() -> Chroma:
             f"ChromaDB not found at {CHROMA_DIR.resolve()}. "
             "Run `python -m financial_rag.ingest` first."
         )
-    embeddings = OpenAIEmbeddings(model=config.EMBEDDING_MODEL)
+    embeddings = config.embeddings()
     return Chroma(
         persist_directory=str(CHROMA_DIR),
         embedding_function=embeddings,
@@ -533,6 +532,8 @@ def retrieve_and_rerank(
             with tracing.tracer.start_as_current_span("rerank.llm"):
                 tracing.note(candidates=len(head))
                 order = [head[i] for i in llm_rank(question, [docs[cid] for cid in head])]
+        except config.GatewayLimit:
+            raise   # a spent budget is the user's answer, not a reason to degrade it
         except Exception as exc:
             print(f"LLM reranking failed, using the cross-encoder order: {exc}")
         else:

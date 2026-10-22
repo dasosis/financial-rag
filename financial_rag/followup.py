@@ -53,15 +53,15 @@ def standalone_question(question: str, history: list[tuple[str, str]]) -> str:
     """
     if not history:
         return question
-    from langchain_openai import ChatOpenAI
-
-    llm = ChatOpenAI(model=config.CHAT_MODEL, temperature=0, timeout=20, max_retries=1)
+    llm = config.chat_model(temperature=0, timeout=20, max_retries=1)
     try:
         result = llm.with_structured_output(_Rewritten).invoke([
             ("system", REWRITE_PROMPT),
             ("human", f"Conversation so far:\n{_transcript(history)}\n\n"
                       f"Latest question: {question}"),
         ])
+    except config.GatewayLimit:
+        raise   # a spent budget is the user's answer, not a reason to degrade it
     except Exception as exc:
         print(f"Couldn't rewrite the follow-up, answering it as asked: {exc}")
         return question

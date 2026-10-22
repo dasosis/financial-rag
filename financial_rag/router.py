@@ -314,12 +314,10 @@ def plan_question(question: str) -> QuestionPlan:
     Read a question into a plan. The model isn't shown the user's filings: given
     a list, it tended to fill in a company the question never named.
     """
-    from langchain_openai import ChatOpenAI
-
     metrics = "\n".join(
         f"- {m.key}: {m.name}. {m.description}" for m in PLANNER_METRICS.values()
     )
-    llm = ChatOpenAI(model=config.CHAT_MODEL, temperature=0).with_structured_output(QuestionPlan)
+    llm = config.chat_model(temperature=0).with_structured_output(QuestionPlan)
     return llm.invoke([
         ("system", PLANNER_PROMPT.format(metrics=metrics)),
         ("human", question),
@@ -398,6 +396,8 @@ def _answer(question: str, owner: str, source_file: str | None, planner) -> Answ
         with tracing.tracer.start_as_current_span("plan"):
             try:
                 plan = planner(question)
+            except config.GatewayLimit:
+                raise   # a spent budget is the user's answer, not a reason to degrade it
             except Exception as exc:
                 print(f"Planner failed, answering from text: {exc}")
                 tracing.note(failed=True)
