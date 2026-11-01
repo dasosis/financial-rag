@@ -46,7 +46,7 @@ jobs:
           test -n "$OPENAI_API_KEY" || { echo "::error::Add the OPENAI_API_KEY repository secret."; exit 1; }
           test -n "$SEC_USER_AGENT" || { echo "::error::Add the SEC_USER_AGENT repository secret."; exit 1; }
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
