@@ -25,7 +25,7 @@ python-multipart>=0.0.20   # FastAPI needs it for file uploads
 pydantic>=2.11.3
 
 # Tracing (tracing.py): off unless OTEL_EXPORTER_OTLP_ENDPOINT is set
-opentelemetry-api>=1.45
+opentelemetry-api>=1.45.1
 opentelemetry-sdk>=1.45
 opentelemetry-exporter-otlp-proto-http>=1.45
 
