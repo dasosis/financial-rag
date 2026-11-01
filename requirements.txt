@@ -17,7 +17,7 @@ lxml>=5.2
 # Serving
 fastapi>=0.115.12
 uvicorn[standard]>=0.34.2
-streamlit>=1.65.0
+streamlit>=1.66.1
 Authlib>=1.3.2             # st.login (OIDC sign-in via Cognito)
 PyJWT[crypto]>=2.10.1      # API: verifies the Cognito ID token (auth.py)
 httpx>=0.28.1
